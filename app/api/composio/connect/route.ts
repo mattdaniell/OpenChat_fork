@@ -4,6 +4,7 @@ import { NextResponse } from "next/server";
 import { api } from "@/convex/_generated/api";
 import { initiateConnection } from "@/lib/composio-server";
 import { SUPPORTED_CONNECTORS } from "@/lib/config/tools";
+import { createErrorResponse } from "@/lib/error-utils";
 import type { ConnectorType } from "@/lib/types";
 
 export async function POST(request: Request) {
@@ -63,10 +64,7 @@ export async function POST(request: Request) {
       redirectUrl,
       connectionRequestId,
     });
-  } catch (_error) {
-    return NextResponse.json(
-      { error: "Failed to initiate connection" },
-      { status: 500 }
-    );
+  } catch (error) {
+    return createErrorResponse(error);
   }
 }

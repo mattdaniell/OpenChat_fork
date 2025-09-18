@@ -9,6 +9,7 @@ import {
 import { z } from "zod";
 import { getComposioTools } from "@/lib/composio-server";
 import type { ConnectorStatusLists } from "@/lib/connector-utils";
+import { classifyError } from "@/lib/error-utils";
 
 const toolNameSchema = z.string().min(1, "Tool name is required");
 
@@ -321,11 +322,16 @@ export const createAgentTool = ({
             }
           }
         } catch (error) {
+          const classified = classifyError(error);
+
+          // Server-side logging would go here, but console is disabled by linter
+          // In production, use a proper logging service like Sentry, LogRocket, etc.
+
           writer.write({
             type: "data-agent-error",
             id: `subagent-${agentId}`,
             data: {
-              error: error instanceof Error ? error.message : "Unknown error",
+              error: classified.userFriendlyMessage,
               agentId: `subagent-${agentId}`,
             },
           });

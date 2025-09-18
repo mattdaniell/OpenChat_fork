@@ -1485,7 +1485,10 @@ function MessageAssistantInner({
                 })}
 
                 {error && (
-                  <div className="mt-4 rounded-lg bg-red-50 px-4 py-3 text-red-800 text-sm dark:bg-red-900/20 dark:text-red-300">
+                  <div
+                    className="mt-4 rounded-lg bg-red-50 px-4 py-3 text-red-800 text-sm dark:bg-red-900/20 dark:text-red-300"
+                    role="alert"
+                  >
                     <div className="font-medium">Error:</div>
                     <div className="mt-1">{error.data.error}</div>
                   </div>

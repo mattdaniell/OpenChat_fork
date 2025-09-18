@@ -76,6 +76,17 @@ function getHttpStatusForErrorCode(code: string): number {
     case ERROR_CODES.UPLOAD_FAILED:
       return 500;
 
+    // Connector errors
+    case ERROR_CODES.CONNECTION_NOT_FOUND:
+      return 404;
+    case ERROR_CODES.CONNECTOR_NOT_SUPPORTED:
+      return 400;
+    case ERROR_CODES.CONNECTOR_AUTH_FAILED:
+      return 401;
+    case ERROR_CODES.CONNECTION_FAILED:
+    case ERROR_CODES.CONNECTION_TIMEOUT:
+      return 500;
+
     default:
       return 500;
   }
@@ -127,6 +138,18 @@ function getResponseTypeForErrorCode(code: string): string {
       return "unsupported_operation";
     case ERROR_CODES.UPLOAD_FAILED:
       return "upload_failed";
+
+    // Connector errors
+    case ERROR_CODES.CONNECTION_FAILED:
+      return "connection_failed";
+    case ERROR_CODES.CONNECTION_NOT_FOUND:
+      return "connection_not_found";
+    case ERROR_CODES.CONNECTION_TIMEOUT:
+      return "connection_timeout";
+    case ERROR_CODES.CONNECTOR_NOT_SUPPORTED:
+      return "connector_not_supported";
+    case ERROR_CODES.CONNECTOR_AUTH_FAILED:
+      return "connector_auth_failed";
 
     default:
       return "unknown_error";

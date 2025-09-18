@@ -1,3 +1,4 @@
+import { handleSearchError } from "../search-errors";
 import {
   PROVIDER_LIMITS,
   SEARCH_CONFIG,
@@ -65,9 +66,7 @@ export class BraveSearchProvider implements SearchAdapter {
 
       return this.formatResults(data.web?.results || [], scrapeContent);
     } catch (error) {
-      throw new Error(
-        `Failed to search with Brave: ${error instanceof Error ? error.message : "Unknown error"}`
-      );
+      handleSearchError(error, "brave");
     }
   }
 

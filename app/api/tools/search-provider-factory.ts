@@ -1,3 +1,4 @@
+import { classifyError } from "@/lib/error-utils";
 import { BraveSearchProvider } from "./providers/brave-search";
 import { ExaSearchProvider } from "./providers/exa-search";
 import { TavilySearchProvider } from "./providers/tavily-search";
@@ -102,8 +103,9 @@ export async function searchWithFallback(
     } catch (error) {
       // If this is the last provider, throw the error
       if (providerIndex === providersToTry.length - 1) {
+        const classified = classifyError(error);
         throw new Error(
-          `All search providers failed. Last error: ${error instanceof Error ? error.message : "Unknown error"}`
+          `All search providers failed. Last error: ${classified.userFriendlyMessage}`
         );
       }
       // Otherwise, try the next provider

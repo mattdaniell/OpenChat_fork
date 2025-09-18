@@ -158,6 +158,7 @@ export const ChainOfThoughtHeader = memo(
 
     return (
       <button
+        aria-expanded={isOpen}
         className={buttonClassName}
         onClick={handleToggleExpanded}
         type="button"
@@ -328,6 +329,7 @@ export const ChainOfThoughtContent = memo(
           height: isOpen ? "auto" : 0,
           opacity: isOpen ? 1 : 0,
         }}
+        aria-hidden={!isOpen}
         className={resultsClassName}
         initial={{
           height: isOpen ? "auto" : 0,

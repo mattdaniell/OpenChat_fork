@@ -1031,10 +1031,8 @@ export async function POST(req: Request) {
         }
       },
       onError: (error) => {
-        if (error instanceof Error) {
-          return error.message;
-        }
-        return "An error occurred.";
+        const { errorPayload } = createStreamingError(error);
+        return errorPayload.error.message;
       },
     });
 

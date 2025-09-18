@@ -43,6 +43,14 @@ export const FILE_ERRORS = {
   UPLOAD_FAILED: "UPLOAD_FAILED",
 } as const;
 
+export const CONNECTOR_ERRORS = {
+  CONNECTION_FAILED: "CONNECTION_FAILED",
+  CONNECTION_NOT_FOUND: "CONNECTION_NOT_FOUND",
+  CONNECTION_TIMEOUT: "CONNECTION_TIMEOUT",
+  CONNECTOR_NOT_SUPPORTED: "CONNECTOR_NOT_SUPPORTED",
+  CONNECTOR_AUTH_FAILED: "CONNECTOR_AUTH_FAILED",
+} as const;
+
 // Combined error codes for easy import
 export const ERROR_CODES = {
   ...AUTH_ERRORS,
@@ -50,6 +58,7 @@ export const ERROR_CODES = {
   ...RATE_LIMIT_ERRORS,
   ...BUSINESS_ERRORS,
   ...FILE_ERRORS,
+  ...CONNECTOR_ERRORS,
 } as const;
 
 // Type for all error codes
@@ -109,6 +118,18 @@ export function getErrorMessage(code: ErrorCode): string {
       return "File is too large. Please upload a smaller file.";
     case ERROR_CODES.UPLOAD_FAILED:
       return "File upload failed. Please try again.";
+
+    // Connector errors
+    case ERROR_CODES.CONNECTION_FAILED:
+      return "Failed to establish connection. Please try again.";
+    case ERROR_CODES.CONNECTION_NOT_FOUND:
+      return "Connection not found. Please reconnect the service.";
+    case ERROR_CODES.CONNECTION_TIMEOUT:
+      return "Connection timed out. Please try again.";
+    case ERROR_CODES.CONNECTOR_NOT_SUPPORTED:
+      return "This connector is not supported.";
+    case ERROR_CODES.CONNECTOR_AUTH_FAILED:
+      return "Authentication failed for this connector. Please reconnect.";
 
     default:
       return "An unexpected error occurred. Please try again.";
