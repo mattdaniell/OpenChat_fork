@@ -1092,12 +1092,20 @@ export async function POST(req: Request) {
           cachedInputTokens: finalUsage.cachedInputTokens,
         };
 
-        const capturedText = responseMessage.parts
+        const sanitizedParts = (responseMessage.parts ?? []).filter((part) => {
+          if (!part || typeof part !== "object") {
+            return true;
+          }
+
+          return (part as { transient?: unknown }).transient !== true;
+        });
+
+        const capturedText = sanitizedParts
           .filter((part) => part.type === "text")
           .map((part) => part.text)
           .join("");
 
-        const depthLimitedParts = limitDepth(responseMessage.parts, 14);
+        const depthLimitedParts = limitDepth(sanitizedParts, 14);
 
         await fetchMutation(
           api.messages.saveAssistantMessage,

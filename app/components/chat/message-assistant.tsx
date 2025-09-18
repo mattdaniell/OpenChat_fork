@@ -2,6 +2,7 @@
 
 import type { UIMessage as MessageType } from "@ai-sdk/react";
 import type {
+  DynamicToolUIPart,
   FileUIPart,
   ReasoningUIPart,
   SourceUrlUIPart,
@@ -39,70 +40,13 @@ type ErrorUIPart = {
   };
 };
 
-// Agent data part types for custom streaming
-type AgentStartDataPart = {
-  type: "data-agent-start";
-  id: string;
-  data: {
-    task: string;
-    tool: string[];
-    agentId: string;
-  };
+// Helper type for create_agent tool boundaries
+type CreateAgentBoundary = {
+  startIndex: number;
+  endIndex: number;
+  task: string;
+  toolkits: string[];
 };
-
-type AgentStepDataPart = {
-  type: "data-agent-step";
-  id: string;
-  data: {
-    type: "text" | "tool" | "reasoning" | "step";
-    status: "start" | "end" | "input-available" | "output-available" | "finish";
-    stepId: string;
-    // Optional fields based on step type
-    contentId?: string;
-    toolCallId?: string;
-    toolName?: string;
-    input?: unknown;
-    output?: unknown;
-  };
-};
-
-type AgentStepUpdateDataPart = {
-  type: "data-agent-step-update";
-  id: string;
-  data: {
-    type: "text" | "reasoning" | "tool";
-    delta: string;
-    contentId?: string;
-    toolCallId?: string;
-    stepId: string;
-  };
-};
-
-type AgentEndDataPart = {
-  type: "data-agent-end";
-  id: string;
-  data: {
-    result: string;
-    agentId: string;
-  };
-};
-
-type AgentErrorDataPart = {
-  type: "data-agent-error";
-  id: string;
-  data: {
-    error: string;
-    agentId: string;
-  };
-};
-
-// Union type for all agent data parts
-type AgentDataPart =
-  | AgentStartDataPart
-  | AgentStepDataPart
-  | AgentStepUpdateDataPart
-  | AgentEndDataPart
-  | AgentErrorDataPart;
 
 // Type guard for error parts
 const isErrorPart = (part: unknown): part is ErrorUIPart => {
@@ -121,37 +65,178 @@ const isErrorPart = (part: unknown): part is ErrorUIPart => {
   );
 };
 
-// Type guards for agent data parts
-const isAgentDataPart = (part: unknown): part is AgentDataPart => {
+type ToolInvocationPart = ToolUIPart | DynamicToolUIPart;
+
+const isToolInvocationPart = (
+  part: MessageType["parts"][number]
+): part is ToolInvocationPart => {
   return (
     typeof part === "object" &&
     part !== null &&
     "type" in part &&
     typeof part.type === "string" &&
-    part.type.startsWith("data-agent-")
+    (part.type.startsWith("tool-") || part.type === "dynamic-tool")
   );
 };
 
-const isAgentStartPart = (part: unknown): part is AgentStartDataPart => {
-  return isAgentDataPart(part) && part.type === "data-agent-start";
+const getToolNameFromPart = (part: ToolInvocationPart): string => {
+  if (part.type === "dynamic-tool") {
+    return part.toolName;
+  }
+
+  return part.type.replace("tool-", "");
 };
 
-const isAgentStepPart = (part: unknown): part is AgentStepDataPart => {
-  return isAgentDataPart(part) && part.type === "data-agent-step";
+const isCreateAgentToolPart = (
+  part: MessageType["parts"][number]
+): part is ToolInvocationPart => {
+  return (
+    isToolInvocationPart(part) && getToolNameFromPart(part) === "create_agent"
+  );
 };
 
-const isAgentStepUpdatePart = (
-  part: unknown
-): part is AgentStepUpdateDataPart => {
-  return isAgentDataPart(part) && part.type === "data-agent-step-update";
+const toolInvocationCompleted = (part: ToolInvocationPart): boolean => {
+  // Safety check - ensure part has state property
+  if (!part || typeof part !== "object" || !("state" in part)) {
+    return false;
+  }
+
+  // Check for AI SDK v5 completion states
+  const isCompleted =
+    part.state === "output-available" || part.state === "output-error";
+  return isCompleted;
 };
 
-const isAgentEndPart = (part: unknown): part is AgentEndDataPart => {
-  return isAgentDataPart(part) && part.type === "data-agent-end";
+const extractCreateAgentMetadata = (
+  part: ToolInvocationPart
+): { task?: string; toolkits: string[] } => {
+  const metadata: { task?: string; toolkits: string[] } = { toolkits: [] };
+
+  if ("input" in part && part.input && typeof part.input === "object") {
+    const input = part.input as Record<string, unknown>;
+    const maybeTask = input.task;
+    if (typeof maybeTask === "string") {
+      const trimmedTask = maybeTask.trim();
+      if (trimmedTask.length > 0) {
+        metadata.task = trimmedTask;
+      }
+    }
+
+    const maybeTool = input.tool;
+    if (typeof maybeTool === "string") {
+      const trimmedToolkit = maybeTool.trim();
+      if (trimmedToolkit.length > 0) {
+        metadata.toolkits = [trimmedToolkit];
+      }
+    } else if (Array.isArray(maybeTool)) {
+      metadata.toolkits = maybeTool
+        .filter((item): item is string => typeof item === "string")
+        .map((item) => item.trim())
+        .filter((item) => item.length > 0);
+    }
+  }
+
+  return metadata;
 };
 
-const isAgentErrorPart = (part: unknown): part is AgentErrorDataPart => {
-  return isAgentDataPart(part) && part.type === "data-agent-error";
+// Type guard for agent boundary data parts
+type AgentBoundaryDataPart = {
+  type: "data-agent-boundary";
+  id: string;
+  data: {
+    type: "start" | "end";
+    agentId: string;
+    boundaryId: string;
+    timestamp: string;
+    task?: string;
+    toolkits?: string[];
+    result?: string;
+  };
+};
+
+const isAgentBoundaryPart = (
+  part: MessageType["parts"][number]
+): part is AgentBoundaryDataPart => {
+  return (
+    typeof part === "object" &&
+    part !== null &&
+    "type" in part &&
+    part.type === "data-agent-boundary" &&
+    "data" in part &&
+    typeof part.data === "object" &&
+    part.data !== null &&
+    "type" in part.data &&
+    (part.data.type === "start" || part.data.type === "end") &&
+    "agentId" in part.data &&
+    "boundaryId" in part.data
+  );
+};
+
+// Helper function to find create_agent tool boundaries using custom markers
+const findCreateAgentBoundary = (
+  parts: MessageType["parts"]
+): CreateAgentBoundary | null => {
+  if (!parts || parts.length === 0) {
+    return null;
+  }
+
+  let startIndex = -1;
+  let endIndex = -1;
+  let boundaryId = "";
+  let task = "";
+  let toolkits: string[] = [];
+
+  // Find start and end boundary markers
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i];
+
+    if (isAgentBoundaryPart(part) && part.data.agentId === "create_agent") {
+      if (part.data.type === "start") {
+        startIndex = i;
+        boundaryId = part.data.boundaryId;
+        task = part.data.task || "";
+        toolkits = part.data.toolkits || [];
+      } else if (
+        part.data.type === "end" &&
+        part.data.boundaryId === boundaryId &&
+        startIndex !== -1
+      ) {
+        endIndex = i;
+        break; // Found matching end boundary
+      }
+    }
+  }
+
+  // If we found a start boundary but no matching end, include everything until the end
+  if (startIndex !== -1 && endIndex === -1) {
+    endIndex = parts.length - 1;
+  }
+
+  // Validate we have a valid boundary
+  if (startIndex === -1 || endIndex < startIndex) {
+    // Fallback: look for create_agent tool part (for compatibility)
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i];
+      if (isCreateAgentToolPart(part)) {
+        const { task: fallbackTask, toolkits: fallbackToolkits } =
+          extractCreateAgentMetadata(part);
+        return {
+          startIndex: i,
+          endIndex: Math.min(i + 5, parts.length - 1), // Conservative fallback
+          task: fallbackTask || "",
+          toolkits: fallbackToolkits,
+        };
+      }
+    }
+    return null;
+  }
+
+  return {
+    startIndex,
+    endIndex,
+    task,
+    toolkits,
+  };
 };
 
 import {
@@ -508,7 +593,7 @@ const CONNECTOR_ACTION_LABELS: Partial<Record<ConnectorType, string>> = {
   twitter: "Broadcasting to",
 };
 
-const buildConnectorLabel = (
+const _buildConnectorLabel = (
   connectorType: ConnectorType,
   displayName: string
 ): string => {
@@ -527,11 +612,6 @@ const buildGenericToolLabel = (toolName: string): string => {
 const renderToolPart = (part: ToolUIPart, index: number, _id: string) => {
   const extendedPart = part as ExtendedToolUIPart;
   const toolType = part.type.replace("tool-", "");
-
-  if (toolType === "create_agent") {
-    // Don't render any UI for create_agent tool - the Chain of Thought UI handles everything
-    return null;
-  }
 
   // Handle search tools
   if (toolType === "search") {
@@ -689,6 +769,132 @@ const renderToolPart = (part: ToolUIPart, index: number, _id: string) => {
   return null;
 };
 
+// Helper function to render a part directly (outside Chain of Thought)
+const renderPartDirectly = (
+  part: MessageType["parts"][number],
+  index: number,
+  id: string,
+  partKey: string,
+  reasoningStates: Record<string, boolean>,
+  reasoningStreamingStates: Record<string, boolean>,
+  toggleReasoning: (partIndex: number) => void
+) => {
+  switch (part.type) {
+    case "text":
+      return renderTextPart(part as { type: "text"; text: string }, index, id);
+
+    case "reasoning":
+      return renderReasoningPart(
+        part as ReasoningUIPart,
+        index,
+        id,
+        reasoningStates[`${id}-${index}`],
+        () => toggleReasoning(index),
+        reasoningStreamingStates[`${id}-${index}`]
+      );
+
+    case "file":
+      return (
+        <div className="flex w-full flex-wrap gap-2" key={partKey}>
+          {renderFilePart(part as FileUIPart, index)}
+        </div>
+      );
+
+    default:
+      if (part.type.startsWith("tool-")) {
+        return renderToolPart(part as ToolUIPart, index, id);
+      }
+      if (isErrorPart(part)) {
+        return renderErrorPart(part, index);
+      }
+      // Skip rendering boundary markers (they're only for detection)
+      if (part.type === "data-agent-boundary") {
+        return null;
+      }
+      return null;
+  }
+};
+
+// Helper function to render a part inside Chain of Thought with ChainOfThoughtStep wrappers
+const renderPartInChainOfThought = (
+  part: MessageType["parts"][number],
+  index: number,
+  id: string,
+  partKey: string,
+  reasoningStates: Record<string, boolean>,
+  reasoningStreamingStates: Record<string, boolean>,
+  toggleReasoning: (partIndex: number) => void
+) => {
+  switch (part.type) {
+    case "text":
+      return (
+        <ChainOfThoughtStep
+          key={partKey}
+          label="Agent Response"
+          status="complete"
+        >
+          {renderTextPart(part as { type: "text"; text: string }, index, id)}
+        </ChainOfThoughtStep>
+      );
+
+    case "reasoning":
+      return (
+        <ChainOfThoughtStep key={partKey} label="Thinking" status="complete">
+          {renderReasoningPart(
+            part as ReasoningUIPart,
+            index,
+            id,
+            reasoningStates[`${id}-${index}`],
+            () => toggleReasoning(index),
+            reasoningStreamingStates[`${id}-${index}`]
+          )}
+        </ChainOfThoughtStep>
+      );
+
+    case "file":
+      return (
+        <ChainOfThoughtStep
+          key={partKey}
+          label="File Attachment"
+          status="complete"
+        >
+          <div className="flex w-full flex-wrap gap-2">
+            {renderFilePart(part as FileUIPart, index)}
+          </div>
+        </ChainOfThoughtStep>
+      );
+
+    default:
+      if (part.type.startsWith("tool-")) {
+        const toolPart = part as ToolUIPart;
+        const toolType = toolPart.type.replace("tool-", "");
+        const toolLabel = isConnectorTool(toolType)
+          ? getConnectorConfig(
+              getConnectorTypeFromToolName(toolType) as ConnectorType
+            )?.displayName || buildGenericToolLabel(toolType)
+          : buildGenericToolLabel(toolType);
+
+        return (
+          <ChainOfThoughtStep key={partKey} label={toolLabel} status="complete">
+            {renderToolPart(toolPart, index, id)}
+          </ChainOfThoughtStep>
+        );
+      }
+      if (isErrorPart(part)) {
+        return (
+          <ChainOfThoughtStep key={partKey} label="Error" status="complete">
+            {renderErrorPart(part, index)}
+          </ChainOfThoughtStep>
+        );
+      }
+      // Skip rendering boundary markers (they're only for detection)
+      if (part.type === "data-agent-boundary") {
+        return null;
+      }
+      return null;
+  }
+};
+
 const renderErrorPart = (part: ErrorUIPart, index: number) => {
   return (
     <div
@@ -701,367 +907,62 @@ const renderErrorPart = (part: ErrorUIPart, index: number) => {
   );
 };
 
-// Helper function to reconstruct content parts from agent steps
-const reconstructAgentContentParts = (
-  steps: (AgentStepDataPart | AgentStepUpdateDataPart)[]
-): MessageType["parts"] => {
-  const contentParts: (MessageType["parts"][number] | null)[] = [];
-  const textAccumulator: Record<
-    string,
-    { text: string; isStreaming: boolean; index?: number }
-  > = {};
-  const reasoningAccumulator: Record<
-    string,
-    { text: string; isStreaming: boolean; index?: number }
-  > = {};
-  const toolParts: Record<string, ExtendedToolUIPart> = {};
-
-  // Process steps to reconstruct content
-  for (const step of steps) {
-    if (isAgentStepPart(step)) {
-      const stepData = step.data;
-
-      switch (stepData.type) {
-        case "text":
-          if (stepData.status === "start" && stepData.contentId) {
-            const existing = textAccumulator[stepData.contentId];
-            if (existing && typeof existing.index === "number") {
-              textAccumulator[stepData.contentId] = {
-                ...existing,
-                isStreaming: true,
-              };
-            } else {
-              const placeholderIndex = contentParts.length;
-              contentParts.push({ type: "text", text: "" });
-              textAccumulator[stepData.contentId] = {
-                text: existing?.text ?? "",
-                isStreaming: true,
-                index: placeholderIndex,
-              };
-            }
-          } else if (
-            stepData.status === "end" &&
-            stepData.contentId &&
-            textAccumulator[stepData.contentId]
-          ) {
-            const accumulator = textAccumulator[stepData.contentId];
-            accumulator.isStreaming = false;
-            if (
-              typeof accumulator.index === "number" &&
-              accumulator.index < contentParts.length
-            ) {
-              if (accumulator.text.trim()) {
-                contentParts[accumulator.index] = {
-                  type: "text",
-                  text: accumulator.text,
-                };
-              } else {
-                contentParts[accumulator.index] = null;
-              }
-            }
-          }
-          break;
-
-        case "reasoning":
-          if (stepData.status === "start" && stepData.contentId) {
-            const existing = reasoningAccumulator[stepData.contentId];
-            if (existing && typeof existing.index === "number") {
-              reasoningAccumulator[stepData.contentId] = {
-                ...existing,
-                isStreaming: true,
-              };
-            } else {
-              const placeholderIndex = contentParts.length;
-              contentParts.push({ type: "reasoning", text: "" });
-              reasoningAccumulator[stepData.contentId] = {
-                text: existing?.text ?? "",
-                isStreaming: true,
-                index: placeholderIndex,
-              };
-            }
-          } else if (
-            stepData.status === "end" &&
-            stepData.contentId &&
-            reasoningAccumulator[stepData.contentId]
-          ) {
-            const accumulator = reasoningAccumulator[stepData.contentId];
-            accumulator.isStreaming = false;
-            if (
-              typeof accumulator.index === "number" &&
-              accumulator.index < contentParts.length
-            ) {
-              if (accumulator.text.trim()) {
-                contentParts[accumulator.index] = {
-                  type: "reasoning",
-                  text: accumulator.text,
-                };
-              } else {
-                contentParts[accumulator.index] = null;
-              }
-            }
-          }
-          break;
-
-        case "tool":
-          if (stepData.toolCallId && stepData.toolName) {
-            // Update based on status
-            if (stepData.status === "input-available" && stepData.input) {
-              // Check if this tool part already exists
-              if (!toolParts[stepData.toolCallId]) {
-                // Create tool part with input and add to contentParts immediately
-                const inputToolPart = {
-                  type: `tool-${stepData.toolName.toLowerCase().replace(/_/g, "-")}`,
-                  toolCallId: stepData.toolCallId,
-                  state: "input-available",
-                  input: stepData.input,
-                  toolName: stepData.toolName,
-                } as ExtendedToolUIPart;
-
-                toolParts[stepData.toolCallId] = inputToolPart;
-                contentParts.push(inputToolPart);
-              }
-            } else if (
-              stepData.status === "output-available" &&
-              stepData.output
-            ) {
-              // Handle output-available: always update/create the tool part
-              const toolType = `tool-${stepData.toolName
-                .toLowerCase()
-                .replace(/_/g, "-")}`;
-
-              const existingToolPart = toolParts[stepData.toolCallId];
-
-              if (existingToolPart) {
-                // Update existing tool part
-                const resolvedToolName =
-                  existingToolPart.toolName ?? stepData.toolName;
-                const updatedToolPart = {
-                  ...existingToolPart,
-                  type: toolType,
-                  toolCallId: stepData.toolCallId,
-                  state: "output-available",
-                  input: existingToolPart.input ?? stepData.input ?? {},
-                  output: stepData.output,
-                  toolName: resolvedToolName,
-                } as ExtendedToolUIPart & {
-                  state: "output-available";
-                  input: unknown;
-                  output: unknown;
-                };
-
-                // Update the toolParts record
-                toolParts[stepData.toolCallId] = updatedToolPart;
-
-                // Find and replace in contentParts
-                const existingIndex = contentParts.findIndex(
-                  (part) =>
-                    part?.type.startsWith("tool-") &&
-                    "toolCallId" in part &&
-                    part.toolCallId === stepData.toolCallId
-                );
-
-                if (existingIndex !== -1) {
-                  contentParts[existingIndex] = updatedToolPart;
-                } else {
-                  // Not found in contentParts, add it
-                  contentParts.push(updatedToolPart);
-                }
-              } else {
-                // No tool part exists yet, create a complete one
-                const completeToolPart = {
-                  type: toolType,
-                  toolCallId: stepData.toolCallId,
-                  state: "output-available",
-                  input: stepData.input || {},
-                  output: stepData.output,
-                  toolName: stepData.toolName,
-                } as ExtendedToolUIPart & {
-                  state: "output-available";
-                  input: unknown;
-                  output: unknown;
-                };
-
-                toolParts[stepData.toolCallId] = completeToolPart;
-                contentParts.push(completeToolPart);
-              }
-            }
-          }
-          break;
-
-        default:
-          // Unknown step type, skip
-          break;
-      }
-    } else if (isAgentStepUpdatePart(step)) {
-      const updateData = step.data;
-
-      if (
-        updateData.type === "text" &&
-        updateData.contentId &&
-        updateData.delta
-      ) {
-        if (textAccumulator[updateData.contentId]) {
-          const accumulator = textAccumulator[updateData.contentId];
-          accumulator.text += updateData.delta;
-          const index = accumulator.index;
-          if (typeof index === "number" && index < contentParts.length) {
-            contentParts[index] = {
-              type: "text",
-              text: accumulator.text,
-            };
-          }
-        } else {
-          const placeholderIndex = contentParts.length;
-          const text = updateData.delta;
-          contentParts.push({ type: "text", text });
-          textAccumulator[updateData.contentId] = {
-            text,
-            isStreaming: true,
-            index: placeholderIndex,
-          };
-        }
-      } else if (
-        updateData.type === "reasoning" &&
-        updateData.contentId &&
-        updateData.delta &&
-        reasoningAccumulator[updateData.contentId]
-      ) {
-        const accumulator = reasoningAccumulator[updateData.contentId];
-        accumulator.text += updateData.delta;
-        const index = accumulator.index;
-        if (typeof index === "number" && index < contentParts.length) {
-          contentParts[index] = {
-            type: "reasoning",
-            text: accumulator.text,
-          };
-        }
-        // Note: Tool deltas are not used in current sub-agent implementation
-      } else if (
-        updateData.type === "reasoning" &&
-        updateData.contentId &&
-        updateData.delta
-      ) {
-        const placeholderIndex = contentParts.length;
-        const text = updateData.delta;
-        contentParts.push({ type: "reasoning", text });
-        reasoningAccumulator[updateData.contentId] = {
-          text,
-          isStreaming: true,
-          index: placeholderIndex,
-        };
-      }
-    }
-  }
-
-  // Add any streaming content that's still in progress
-  for (const acc of Object.values(textAccumulator)) {
-    if (acc.isStreaming && acc.text.trim() && typeof acc.index !== "number") {
-      contentParts.push({ type: "text", text: acc.text });
-    }
-  }
-
-  for (const acc of Object.values(reasoningAccumulator)) {
-    if (acc.isStreaming && acc.text.trim() && typeof acc.index !== "number") {
-      contentParts.push({ type: "reasoning", text: acc.text });
-    }
-  }
-
-  return contentParts.filter(
-    (part): part is MessageType["parts"][number] => part !== null
-  );
-};
-
-// Helper function to group agent data parts while preserving stream order
-type AgentGroup = {
-  agentId: string;
-  startIndex: number;
-  start: AgentStartDataPart;
-  steps: (AgentStepDataPart | AgentStepUpdateDataPart)[];
-  end?: AgentEndDataPart;
-  error?: AgentErrorDataPart;
-};
-
-type OrderedPart =
-  | {
-      kind: "regular";
-      index: number;
-      part: MessageType["parts"][number];
-    }
-  | {
-      kind: "agent";
-      index: number;
-      group: AgentGroup;
+// Helper function to split parts based on create_agent tool boundaries
+const splitPartsByAgentBoundary = (parts: MessageType["parts"]) => {
+  // Input validation
+  if (!(parts && Array.isArray(parts))) {
+    return {
+      beforeAgent: [],
+      agentParts: [],
+      afterAgent: [],
+      agentBoundary: null,
     };
-
-const resolveAgentIdForStep = (
-  groups: Record<string, AgentGroup>,
-  part: AgentStepDataPart | AgentStepUpdateDataPart
-) => {
-  const candidates = Object.keys(groups);
-  for (const candidate of candidates) {
-    if (part.id.startsWith(candidate)) {
-      return candidate;
-    }
-    if ("stepId" in part.data && part.data.stepId.startsWith(candidate)) {
-      return candidate;
-    }
-  }
-  return null;
-};
-
-const groupAgentDataParts = (parts: MessageType["parts"]) => {
-  if (!parts) {
-    return [] as OrderedPart[];
   }
 
-  const agentGroups: Record<string, AgentGroup> = {};
-  const orderedParts: OrderedPart[] = [];
+  const agentBoundary = findCreateAgentBoundary(parts);
 
-  parts.forEach((part, index) => {
-    if (isAgentStartPart(part)) {
-      const agentId = part.data.agentId;
-      const group: AgentGroup = {
-        agentId,
-        startIndex: index,
-        start: part,
-        steps: [],
-      };
+  if (!agentBoundary) {
+    // No agent boundary found, render all parts normally
+    return {
+      beforeAgent: parts,
+      agentParts: [],
+      afterAgent: [],
+      agentBoundary: null,
+    };
+  }
 
-      agentGroups[agentId] = group;
-      orderedParts.push({ kind: "agent", index, group });
-      return;
-    }
+  const { startIndex, endIndex } = agentBoundary;
+  const allParts = parts;
 
-    if (isAgentStepPart(part) || isAgentStepUpdatePart(part)) {
-      const agentId = resolveAgentIdForStep(agentGroups, part);
-      if (agentId) {
-        agentGroups[agentId].steps.push(part);
-      }
-      return;
-    }
+  // Boundary validation
+  if (
+    startIndex < 0 ||
+    endIndex < 0 ||
+    startIndex >= allParts.length ||
+    endIndex >= allParts.length ||
+    startIndex > endIndex
+  ) {
+    // Fallback to treating all parts as non-agent content
+    return {
+      beforeAgent: allParts,
+      agentParts: [],
+      afterAgent: [],
+      agentBoundary: null,
+    };
+  }
 
-    if (isAgentEndPart(part)) {
-      const group = agentGroups[part.data.agentId];
-      if (group) {
-        group.end = part;
-      }
-      return;
-    }
+  // Safe array slicing with bounds checking
+  const beforeAgent = startIndex > 0 ? allParts.slice(0, startIndex) : [];
+  const agentParts = allParts.slice(startIndex, endIndex + 1);
+  const afterAgent =
+    endIndex + 1 < allParts.length ? allParts.slice(endIndex + 1) : [];
 
-    if (isAgentErrorPart(part)) {
-      const group = agentGroups[part.data.agentId];
-      if (group) {
-        group.error = part;
-      }
-      return;
-    }
-
-    if (!isAgentDataPart(part)) {
-      orderedParts.push({ kind: "regular", index, part });
-    }
-  });
-
-  return orderedParts.sort((a, b) => a.index - b.index);
+  return {
+    beforeAgent,
+    agentParts,
+    afterAgent,
+    agentBoundary,
+  };
 };
 
 function MessageAssistantInner({
@@ -1081,8 +982,8 @@ function MessageAssistantInner({
   // Prefer `parts` prop, but fall back to `attachments` if `parts` is undefined.
   const combinedParts = parts || [];
 
-  const orderedParts = useMemo(
-    () => groupAgentDataParts(combinedParts),
+  const { beforeAgent, agentParts, afterAgent, agentBoundary } = useMemo(
+    () => splitPartsByAgentBoundary(combinedParts),
     [combinedParts]
   );
 
@@ -1097,83 +998,20 @@ function MessageAssistantInner({
   const initialStatusRef = useRef<Record<string, boolean>>({});
   const [isTouch, setIsTouch] = useState(false);
 
-  const [agentOpenStates, setAgentOpenStates] = useState<
-    Record<string, boolean>
-  >({});
-  const agentManualOverrideRef = useRef<Record<string, boolean>>({});
+  // Simple agent open state based on tool completion
+  const [agentOpen, setAgentOpen] = useState<boolean>(true);
+  const agentManualOverride = useRef<boolean>(false);
 
   useEffect(() => {
-    setAgentOpenStates((prevStates) => {
-      let nextStates = prevStates;
-      let hasChanges = false;
-      const presentAgents = new Set<string>();
-
-      orderedParts.forEach((item, orderedIndex) => {
-        if (item.kind !== "agent") {
-          return;
-        }
-
-        const { agentId, end, error } = item.group;
-        presentAgents.add(agentId);
-
-        if (agentManualOverrideRef.current[agentId] === undefined) {
-          agentManualOverrideRef.current[agentId] = false;
-        }
-
-        const hasNextStreamingText =
-          status === "streaming" &&
-          orderedParts.slice(orderedIndex + 1).some((nextItem) => {
-            if (nextItem.kind !== "regular") {
-              return false;
-            }
-            const nextPart = nextItem.part;
-            return nextPart.type === "text";
-          });
-
-        const shouldAutoClose =
-          Boolean(end || error) &&
-          (status !== "streaming" || hasNextStreamingText);
-        const desiredState = !shouldAutoClose;
-
-        if (prevStates[agentId] === undefined) {
-          if (!hasChanges) {
-            nextStates = { ...prevStates };
-            hasChanges = true;
-          }
-          nextStates[agentId] = desiredState;
-        }
-
-        if (
-          agentManualOverrideRef.current[agentId] === false &&
-          prevStates[agentId] !== desiredState
-        ) {
-          if (!hasChanges) {
-            nextStates = { ...prevStates };
-            hasChanges = true;
-          }
-          nextStates[agentId] = desiredState;
-        }
-      });
-
-      if (
-        Object.keys(prevStates).some((agentId) => !presentAgents.has(agentId))
-      ) {
-        if (!hasChanges) {
-          nextStates = { ...prevStates };
-          hasChanges = true;
-        }
-
-        for (const agentId of Object.keys(prevStates)) {
-          if (!presentAgents.has(agentId)) {
-            delete nextStates[agentId];
-            delete agentManualOverrideRef.current[agentId];
-          }
-        }
-      }
-
-      return hasChanges ? nextStates : prevStates;
-    });
-  }, [orderedParts, status]);
+    if (agentBoundary && !agentManualOverride.current) {
+      // Close the chain when the create_agent orchestration finishes producing output.
+      const hasCompleted = agentParts.some(
+        (part) => isCreateAgentToolPart(part) && toolInvocationCompleted(part)
+      );
+      const shouldAutoClose = hasCompleted && status !== "streaming";
+      setAgentOpen(!shouldAutoClose);
+    }
+  }, [agentBoundary, agentParts, status]);
 
   // Initialize reasoning states - only run once when reasoning parts are first detected
   useEffect(() => {
@@ -1302,199 +1140,72 @@ function MessageAssistantInner({
       id={id}
     >
       <div className={cn("flex w-full flex-col gap-2", isLast && "pb-8")}>
-        {/* Render agent data parts and regular parts */}
-        {orderedParts.map((item) => {
-          if (item.kind === "regular") {
-            const { part, index } = item;
-            const partKey = `${part.type}-${index}`;
+        {/* Render parts in order: beforeAgent -> ChainOfThought(agentParts) -> afterAgent */}
 
-            switch (part.type) {
-              case "text":
-                return renderTextPart(
-                  part as { type: "text"; text: string },
-                  index,
-                  id
-                );
+        {/* Render parts before agent normally */}
+        {beforeAgent.map((part, index) => {
+          const partKey = `before-${part.type}-${index}`;
+          return renderPartDirectly(
+            part,
+            index,
+            id,
+            partKey,
+            reasoningStates,
+            reasoningStreamingStates,
+            toggleReasoning
+          );
+        })}
 
-              case "reasoning":
-                return renderReasoningPart(
-                  part as ReasoningUIPart,
-                  index,
-                  id,
-                  reasoningStates[`${id}-${index}`],
-                  () => toggleReasoning(index),
-                  reasoningStreamingStates[`${id}-${index}`]
-                );
-
-              case "file":
-                return (
-                  <div className="flex w-full flex-wrap gap-2" key={partKey}>
-                    {renderFilePart(part as FileUIPart, index)}
-                  </div>
-                );
-
-              default:
-                if (part.type.startsWith("tool-")) {
-                  return renderToolPart(part as ToolUIPart, index, id);
-                }
-                if (isErrorPart(part)) {
-                  return renderErrorPart(part, index);
-                }
-                return null;
-            }
-          }
-
-          const { group } = item;
-          const { agentId, start, steps: agentSteps, error, end } = group;
-
-          const agentContentParts = reconstructAgentContentParts(agentSteps);
-          const hasCompleted = Boolean(end || error);
-          const agentState = agentOpenStates[agentId];
-          const effectiveAgentOpen = agentState ?? !hasCompleted;
-          const autoScrollKey = hasCompleted ? undefined : agentSteps.length;
-
-          return (
-            <ChainOfThought
-              key={agentId}
-              onOpenChange={(open) => {
-                agentManualOverrideRef.current[agentId] = true;
-                setAgentOpenStates((prev) => ({
-                  ...prev,
-                  [agentId]: open,
-                }));
-              }}
-              open={effectiveAgentOpen}
-              tools={start.data.tool}
-            >
-              <ChainOfThoughtHeader tools={start.data.tool}>
-                {start.data.task.trim()}
-              </ChainOfThoughtHeader>
-              <ChainOfThoughtContent autoScrollKey={autoScrollKey}>
-                {agentContentParts.map((part, contentIndex) => {
-                  const partKey = `${agentId}-content-${contentIndex}`;
-
-                  switch (part.type) {
-                    case "text":
-                      return (
-                        <ChainOfThoughtStep
-                          key={partKey}
-                          label="Field report"
-                          status="complete"
-                        >
-                          {renderTextPart(
-                            part as { type: "text"; text: string },
-                            contentIndex,
-                            `${id}-agent-${agentId}`
-                          )}
-                        </ChainOfThoughtStep>
-                      );
-
-                    case "reasoning":
-                      return (
-                        <ChainOfThoughtStep
-                          key={partKey}
-                          label="Thought process"
-                          status="complete"
-                        >
-                          {renderReasoningPart(
-                            part as ReasoningUIPart,
-                            contentIndex,
-                            `${id}-agent-${agentId}`,
-                            reasoningStates[
-                              `${id}-agent-${agentId}-${contentIndex}`
-                            ],
-                            () => {
-                              const key = `${id}-agent-${agentId}-${contentIndex}`;
-                              setReasoningStates((prev) => ({
-                                ...prev,
-                                [key]: !prev[key],
-                              }));
-                            },
-                            reasoningStreamingStates[
-                              `${id}-agent-${agentId}-${contentIndex}`
-                            ]
-                          )}
-                        </ChainOfThoughtStep>
-                      );
-
-                    case "file":
-                      return (
-                        <ChainOfThoughtStep
-                          key={partKey}
-                          label="File attachment"
-                          status="complete"
-                        >
-                          <div className="flex w-full flex-wrap gap-2">
-                            {renderFilePart(part as FileUIPart, contentIndex)}
-                          </div>
-                        </ChainOfThoughtStep>
-                      );
-
-                    default:
-                      if (part.type.startsWith("tool-")) {
-                        const toolPart = part as ExtendedToolUIPart;
-                        const toolType = part.type.replace("tool-", "");
-                        let toolLabel: string;
-
-                        if (isConnectorTool(toolType)) {
-                          try {
-                            const connectorType =
-                              getConnectorTypeFromToolName(toolType);
-                            const connectorConfig =
-                              getConnectorConfig(connectorType);
-                            toolLabel = buildConnectorLabel(
-                              connectorType,
-                              connectorConfig.displayName
-                            );
-                          } catch (_error) {
-                            const fallbackName = toolPart.toolName ?? toolType;
-                            toolLabel = buildGenericToolLabel(fallbackName);
-                          }
-                        } else {
-                          const fallbackName = toolPart.toolName ?? toolType;
-                          toolLabel = buildGenericToolLabel(fallbackName);
-                        }
-
-                        return (
-                          <ChainOfThoughtStep
-                            key={partKey}
-                            label={toolLabel}
-                            status="complete"
-                          >
-                            {renderToolPart(
-                              toolPart,
-                              contentIndex,
-                              `${id}-agent-${agentId}`
-                            )}
-                          </ChainOfThoughtStep>
-                        );
-                      }
-                      if (isErrorPart(part)) {
-                        return (
-                          <ChainOfThoughtStep
-                            key={partKey}
-                            label="Error occurred"
-                            status="complete"
-                          >
-                            {renderErrorPart(part, contentIndex)}
-                          </ChainOfThoughtStep>
-                        );
-                      }
-                      return null;
+        {/* Render agent parts in Chain of Thought wrapper */}
+        {agentBoundary && (
+          <ChainOfThought
+            key={`agent-${agentBoundary.startIndex}`}
+            onOpenChange={(open) => {
+              agentManualOverride.current = true;
+              setAgentOpen(open);
+            }}
+            open={agentOpen}
+            tools={agentBoundary.toolkits}
+          >
+            <ChainOfThoughtHeader tools={agentBoundary.toolkits}>
+              {agentBoundary.task.trim()}
+            </ChainOfThoughtHeader>
+            <ChainOfThoughtContent>
+              {agentParts
+                .filter((part) => {
+                  // Filter out the create_agent orchestration parts; we only want its inner work steps.
+                  if (isCreateAgentToolPart(part)) {
+                    return false;
                   }
+                  return true;
+                })
+                .map((part, index) => {
+                  const partKey = `agent-${part.type}-${index}`;
+                  return renderPartInChainOfThought(
+                    part,
+                    index,
+                    id,
+                    partKey,
+                    reasoningStates,
+                    reasoningStreamingStates,
+                    toggleReasoning
+                  );
                 })}
+            </ChainOfThoughtContent>
+          </ChainOfThought>
+        )}
 
-                {error && (
-                  <div
-                    className="mt-4 rounded-lg bg-red-50 px-4 py-3 text-red-800 text-sm dark:bg-red-900/20 dark:text-red-300"
-                    role="alert"
-                  >
-                    <div className="font-medium">Error:</div>
-                    <div className="mt-1">{error.data.error}</div>
-                  </div>
-                )}
-              </ChainOfThoughtContent>
-            </ChainOfThought>
+        {/* Render parts after agent normally */}
+        {afterAgent.map((part, index) => {
+          const partKey = `after-${part.type}-${index}`;
+          return renderPartDirectly(
+            part,
+            index,
+            id,
+            partKey,
+            reasoningStates,
+            reasoningStreamingStates,
+            toggleReasoning
           );
         })}
 

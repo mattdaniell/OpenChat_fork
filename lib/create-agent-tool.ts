@@ -1,15 +1,8 @@
 import type { Tool, UIMessage, UIMessageStreamWriter } from "ai";
-import {
-  convertToModelMessages,
-  generateId,
-  stepCountIs,
-  streamText,
-  tool,
-} from "ai";
+import { convertToModelMessages, stepCountIs, streamText, tool } from "ai";
 import { z } from "zod";
 import { getComposioTools } from "@/lib/composio-server";
 import type { ConnectorStatusLists } from "@/lib/connector-utils";
-import { classifyError } from "@/lib/error-utils";
 
 const toolNameSchema = z.string().min(1, "Tool name is required");
 
@@ -148,6 +141,7 @@ export const createAgentTool = ({
         parts: [{ type: "text", text: input.task }],
       };
 
+      // Stream the agent's work using standard AI SDK streaming
       const result = streamText({
         model,
         system: innerSystem,
@@ -157,202 +151,43 @@ export const createAgentTool = ({
         providerOptions,
       });
 
-      // Stream subagent execution as custom data parts for chain-of-thought visualization
-      const agentId = generateId();
-      let stepIndex = 0;
+      // Generate unique boundary ID for this agent execution
+      const boundaryId = `agent-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
-      // Start agent execution
+      // Inject start boundary marker
       writer.write({
-        type: "data-agent-start",
-        id: `subagent-${agentId}`,
+        type: "data-agent-boundary",
+        id: `${boundaryId}-start`,
         data: {
+          type: "start",
+          agentId: "create_agent",
+          boundaryId,
+          timestamp: new Date().toISOString(),
           task: input.task,
-          tool: requestedToolkits,
-          agentId: `subagent-${agentId}`,
+          toolkits: requestedToolkits,
         },
+        transient: false, // Keep in message history for boundary detection
       });
 
-      // Stream subagent chunks as structured data parts
-      (async () => {
-        try {
-          for await (const chunk of result.fullStream) {
-            const stepId = `subagent-${agentId}-step-${stepIndex++}`;
+      // Let AI SDK handle all the streaming naturally
+      writer.merge(result.toUIMessageStream());
 
-            switch (chunk.type) {
-              case "text-start":
-                writer.write({
-                  type: "data-agent-step",
-                  id: stepId,
-                  data: {
-                    type: "text",
-                    status: "start",
-                    contentId: `subagent-${chunk.id}`,
-                    stepId,
-                  },
-                });
-                break;
-
-              case "text-delta":
-                writer.write({
-                  type: "data-agent-step-update",
-                  id: stepId,
-                  data: {
-                    type: "text",
-                    delta: chunk.text,
-                    contentId: `subagent-${chunk.id}`,
-                    stepId,
-                  },
-                });
-                break;
-
-              case "text-end":
-                writer.write({
-                  type: "data-agent-step",
-                  id: stepId,
-                  data: {
-                    type: "text",
-                    status: "end",
-                    contentId: `subagent-${chunk.id}`,
-                    stepId,
-                  },
-                });
-                break;
-
-              case "tool-call":
-                writer.write({
-                  type: "data-agent-step",
-                  id: stepId,
-                  data: {
-                    type: "tool",
-                    status: "input-available",
-                    toolCallId: chunk.toolCallId,
-                    toolName: chunk.toolName,
-                    input: chunk.input,
-                    stepId,
-                  },
-                });
-                break;
-
-              case "tool-result":
-                writer.write({
-                  type: "data-agent-step",
-                  id: stepId,
-                  data: {
-                    type: "tool",
-                    status: "output-available",
-                    toolCallId: chunk.toolCallId,
-                    toolName: chunk.toolName,
-                    input: chunk.input,
-                    output: chunk.output,
-                    stepId,
-                  },
-                });
-                break;
-
-              case "reasoning-start":
-                writer.write({
-                  type: "data-agent-step",
-                  id: stepId,
-                  data: {
-                    type: "reasoning",
-                    status: "start",
-                    contentId: `subagent-${chunk.id}`,
-                    stepId,
-                  },
-                });
-                break;
-
-              case "reasoning-delta":
-                writer.write({
-                  type: "data-agent-step-update",
-                  id: stepId,
-                  data: {
-                    type: "reasoning",
-                    delta: chunk.text,
-                    contentId: `subagent-${chunk.id}`,
-                    stepId,
-                  },
-                });
-                break;
-
-              case "reasoning-end":
-                writer.write({
-                  type: "data-agent-step",
-                  id: stepId,
-                  data: {
-                    type: "reasoning",
-                    status: "end",
-                    contentId: `subagent-${chunk.id}`,
-                    stepId,
-                  },
-                });
-                break;
-
-              case "start-step":
-                writer.write({
-                  type: "data-agent-step",
-                  id: stepId,
-                  data: {
-                    type: "step",
-                    status: "start",
-                    stepId,
-                  },
-                });
-                break;
-
-              case "finish-step":
-                writer.write({
-                  type: "data-agent-step",
-                  id: stepId,
-                  data: {
-                    type: "step",
-                    status: "finish",
-                    stepId,
-                  },
-                });
-                break;
-
-              case "finish":
-                // Handle finish in the main flow after await result.text
-                break;
-
-              default:
-                // Log unknown chunk types for debugging
-                break;
-            }
-          }
-        } catch (error) {
-          const classified = classifyError(error);
-
-          // Server-side logging would go here, but console is disabled by linter
-          // In production, use a proper logging service like Sentry, LogRocket, etc.
-
-          writer.write({
-            type: "data-agent-error",
-            id: `subagent-${agentId}`,
-            data: {
-              error: classified.userFriendlyMessage,
-              agentId: `subagent-${agentId}`,
-            },
-          });
-        }
-      })();
-
+      // Wait for completion and return result
       const finalText = (await result.text).trim();
 
-      // End agent execution
+      // Inject end boundary marker
       writer.write({
-        type: "data-agent-end",
-        id: `subagent-${agentId}`,
+        type: "data-agent-boundary",
+        id: `${boundaryId}-end`,
         data: {
-          result:
-            finalText.length > 0
-              ? finalText
-              : "Delegated agent completed without additional commentary.",
-          agentId: `subagent-${agentId}`,
+          type: "end",
+          agentId: "create_agent",
+          boundaryId,
+          timestamp: new Date().toISOString(),
+          result: finalText,
         },
+        transient: false, // Keep in message history for boundary detection
       });
-
       return finalText.length > 0
         ? finalText
         : "Delegated agent completed without additional commentary.";
