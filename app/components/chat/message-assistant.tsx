@@ -243,7 +243,7 @@ import {
 import dynamic from "next/dynamic"; // Client component – required when using React hooks in the app router
 import Image from "next/image";
 
-import { memo, useEffect, useMemo, useRef, useState } from "react"; // Import React to access memo
+import React, { memo, useEffect, useMemo, useRef, useState } from "react"; // Import React to access memo
 import { ConnectorToolCall } from "@/app/components/tool/connector_tool_call";
 import { UnifiedSearch } from "@/app/components/tool/web_search";
 import {
@@ -261,6 +261,33 @@ import {
 } from "@/lib/config/tools";
 import type { ConnectorType } from "@/lib/types";
 import { SourcesList } from "./sources-list";
+
+// Stable key generation for React reconciliation
+const partKeyMap = new WeakMap<object, string>();
+
+function getStablePartKey(
+  part: MessageType["parts"][number],
+  fallback: string
+): string {
+  const anyPart = part as Record<string, unknown>;
+
+  // Prefer SDK-provided stable ids
+  const toolId = anyPart.toolCallId || anyPart.id || anyPart.callId || null;
+
+  if (toolId && typeof toolId === "string") {
+    return `part-${toolId}`;
+  }
+
+  // Fallback: memoize a generated key for this object identity
+  if (!partKeyMap.has(part as object)) {
+    partKeyMap.set(
+      part as object,
+      `gen-${crypto.randomUUID?.() ?? Math.random().toString(36).slice(2)}`
+    );
+  }
+  const generatedKey = partKeyMap.get(part as object);
+  return generatedKey || fallback;
+}
 
 // Helper function to format model display with reasoning effort
 const formatModelDisplayText = (modelName: string, effort?: string) => {
@@ -576,28 +603,6 @@ const renderReasoningPart = (
 
 type ExtendedToolUIPart = ToolUIPart & { toolName?: string };
 
-const CONNECTOR_ACTION_LABELS: Partial<Record<ConnectorType, string>> = {
-  googlecalendar: "Consulting",
-  googledocs: "Drafting in",
-  googledrive: "Syncing with",
-  googlesheets: "Updating",
-  slack: "Messaging via",
-  linear: "Triaging in",
-  github: "Reviewing on",
-  twitter: "Broadcasting to",
-};
-
-const _buildConnectorLabel = (
-  connectorType: ConnectorType,
-  displayName: string
-): string => {
-  const prefix = CONNECTOR_ACTION_LABELS[connectorType];
-  if (prefix) {
-    return `${prefix} ${displayName}`;
-  }
-  return `Working with ${displayName}`;
-};
-
 const buildGenericToolLabel = (toolName: string): string => {
   const cleaned = toolName.replace(/[_-]+/g, " ");
   return `Engaging ${cleaned}`;
@@ -614,13 +619,7 @@ const renderToolPart = (part: ToolUIPart, index: number, _id: string) => {
     // For in-progress search tools, show loading state
     if ("state" in part && part.state !== "output-available") {
       if (searchQuery) {
-        return (
-          <UnifiedSearch
-            isLoading={true}
-            key={`search-loading-${index}`}
-            query={searchQuery}
-          />
-        );
+        return <UnifiedSearch isLoading={true} query={searchQuery} />;
       }
       // Fallback to original loader if no query is available
       return (
@@ -641,7 +640,6 @@ const renderToolPart = (part: ToolUIPart, index: number, _id: string) => {
         return (
           <UnifiedSearch
             isLoading={false}
-            key={`search-results-${index}`}
             query={searchQuery}
             sources={sources}
           />
@@ -717,13 +715,7 @@ const renderToolPart = (part: ToolUIPart, index: number, _id: string) => {
         timestamp: new Date().toISOString(),
       };
 
-      return (
-        <ConnectorToolCall
-          data={toolCallData}
-          isLoading={isLoading}
-          key={`connector-${part.state}-${index}`}
-        />
-      );
+      return <ConnectorToolCall data={toolCallData} isLoading={isLoading} />;
     }
 
     // Fallback for connector tools without proper state (shouldn't happen with AI SDK v5)
@@ -751,13 +743,7 @@ const renderToolPart = (part: ToolUIPart, index: number, _id: string) => {
       },
     };
 
-    return (
-      <ConnectorToolCall
-        data={fallbackData}
-        isLoading={false}
-        key={`connector-fallback-${index}`}
-      />
-    );
+    return <ConnectorToolCall data={fallbackData} isLoading={false} />;
   }
 
   return null;
@@ -824,7 +810,7 @@ const renderPartInChainOfThought = (
       return (
         <ChainOfThoughtStep
           key={partKey}
-          label="Agent Response"
+          label="Field Report"
           status="complete"
         >
           {renderTextPart(part as { type: "text"; text: string }, index, id)}
@@ -1209,21 +1195,33 @@ function MessageAssistantInner({
       id={id}
     >
       <div className={cn("flex w-full flex-col gap-2", isLast && "pb-8")}>
-        {/* Render parts in order: beforeAgent -> ChainOfThought(agentParts) -> afterAgent */}
+        {/* Show loader when streaming but no content yet */}
+        {status === "streaming" && segments.length === 0 && (
+          <div className="flex items-center gap-2 text-muted-foreground">
+            <Loader size="md" variant="dots" />
+          </div>
+        )}
 
+        {/* Render parts in order: beforeAgent -> ChainOfThought(agentParts) -> afterAgent */}
         {segments.flatMap((segment) => {
           if (segment.type === "normal") {
             return segment.parts.map((part, innerIndex) => {
               const globalIndex = segment.startIndex + innerIndex;
-              const partKey = `${segment.key}-${part.type}-${innerIndex}`;
-              return renderPartDirectly(
-                part,
-                globalIndex,
-                id,
-                partKey,
-                reasoningStates,
-                reasoningStreamingStates,
-                toggleReasoning
+              const fallbackKey = `${segment.key}-${part.type}-${globalIndex}`;
+              const stableKey = getStablePartKey(part, fallbackKey);
+
+              return (
+                <React.Fragment key={stableKey}>
+                  {renderPartDirectly(
+                    part,
+                    globalIndex,
+                    id,
+                    stableKey,
+                    reasoningStates,
+                    reasoningStreamingStates,
+                    toggleReasoning
+                  )}
+                </React.Fragment>
               );
             });
           }
@@ -1262,13 +1260,14 @@ function MessageAssistantInner({
                   }
 
                   const globalIndex = segment.startIndex + innerIndex;
-                  const partKey = `${segment.key}-${part.type}-${innerIndex}`;
+                  const fallbackKey = `${segment.key}-${part.type}-${globalIndex}`;
+                  const stepKey = getStablePartKey(part, fallbackKey);
 
                   return renderPartInChainOfThought(
                     part,
                     globalIndex,
                     id,
-                    partKey,
+                    stepKey,
                     reasoningStates,
                     reasoningStreamingStates,
                     toggleReasoning
