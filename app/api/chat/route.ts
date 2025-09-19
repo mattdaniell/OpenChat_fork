@@ -921,13 +921,13 @@ export async function POST(req: Request) {
               }
               // No throwing - let the stream handle the error state gracefully
             },
-            onFinish({ usage }) {
+            onFinish({ totalUsage }) {
               finalUsage = {
-                inputTokens: usage.inputTokens || 0,
-                outputTokens: usage.outputTokens || 0,
-                reasoningTokens: usage.reasoningTokens || 0,
-                totalTokens: usage.totalTokens || 0,
-                cachedInputTokens: usage.cachedInputTokens || 0,
+                inputTokens: totalUsage.inputTokens || 0,
+                outputTokens: totalUsage.outputTokens || 0,
+                reasoningTokens: totalUsage.reasoningTokens || 0,
+                totalTokens: totalUsage.totalTokens || 0,
+                cachedInputTokens: totalUsage.cachedInputTokens || 0,
               };
             },
           });

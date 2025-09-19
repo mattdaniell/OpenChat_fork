@@ -42,10 +42,12 @@ type ErrorUIPart = {
 
 // Helper type for create_agent tool boundaries
 type CreateAgentBoundary = {
+  boundaryId: string;
   startIndex: number;
   endIndex: number;
   task: string;
   toolkits: string[];
+  result?: string;
 };
 
 // Type guard for error parts
@@ -93,18 +95,6 @@ const isCreateAgentToolPart = (
   return (
     isToolInvocationPart(part) && getToolNameFromPart(part) === "create_agent"
   );
-};
-
-const toolInvocationCompleted = (part: ToolInvocationPart): boolean => {
-  // Safety check - ensure part has state property
-  if (!part || typeof part !== "object" || !("state" in part)) {
-    return false;
-  }
-
-  // Check for AI SDK v5 completion states
-  const isCompleted =
-    part.state === "output-available" || part.state === "output-error";
-  return isCompleted;
 };
 
 const extractCreateAgentMetadata = (
@@ -173,70 +163,74 @@ const isAgentBoundaryPart = (
 };
 
 // Helper function to find create_agent tool boundaries using custom markers
-const findCreateAgentBoundary = (
+const findCreateAgentBoundaries = (
   parts: MessageType["parts"]
-): CreateAgentBoundary | null => {
+): CreateAgentBoundary[] => {
   if (!parts || parts.length === 0) {
-    return null;
+    return [];
   }
 
-  let startIndex = -1;
-  let endIndex = -1;
-  let boundaryId = "";
-  let task = "";
-  let toolkits: string[] = [];
+  const boundaries: CreateAgentBoundary[] = [];
+  const openBoundaries = new Map<
+    string,
+    { startIndex: number; task: string; toolkits: string[] }
+  >();
 
-  // Find start and end boundary markers
-  for (let i = 0; i < parts.length; i++) {
-    const part = parts[i];
-
+  parts.forEach((part, index) => {
     if (isAgentBoundaryPart(part) && part.data.agentId === "create_agent") {
       if (part.data.type === "start") {
-        startIndex = i;
-        boundaryId = part.data.boundaryId;
-        task = part.data.task || "";
-        toolkits = part.data.toolkits || [];
-      } else if (
-        part.data.type === "end" &&
-        part.data.boundaryId === boundaryId &&
-        startIndex !== -1
-      ) {
-        endIndex = i;
-        break; // Found matching end boundary
+        openBoundaries.set(part.data.boundaryId, {
+          startIndex: index,
+          task: part.data.task ?? "",
+          toolkits: part.data.toolkits ?? [],
+        });
+      } else if (part.data.type === "end") {
+        const startInfo = openBoundaries.get(part.data.boundaryId);
+        if (startInfo) {
+          boundaries.push({
+            boundaryId: part.data.boundaryId,
+            startIndex: startInfo.startIndex,
+            endIndex: index,
+            task: startInfo.task,
+            toolkits: startInfo.toolkits,
+            result: part.data.result,
+          });
+          openBoundaries.delete(part.data.boundaryId);
+        }
       }
     }
-  }
+  });
 
-  // If we found a start boundary but no matching end, include everything until the end
-  if (startIndex !== -1 && endIndex === -1) {
-    endIndex = parts.length - 1;
-  }
+  openBoundaries.forEach((startInfo, boundaryId) => {
+    boundaries.push({
+      boundaryId,
+      startIndex: startInfo.startIndex,
+      endIndex: parts.length - 1,
+      task: startInfo.task,
+      toolkits: startInfo.toolkits,
+    });
+  });
 
-  // Validate we have a valid boundary
-  if (startIndex === -1 || endIndex < startIndex) {
-    // Fallback: look for create_agent tool part (for compatibility)
-    for (let i = 0; i < parts.length; i++) {
-      const part = parts[i];
+  if (boundaries.length === 0) {
+    const fallbackBoundaries: CreateAgentBoundary[] = [];
+    parts.forEach((part, index) => {
       if (isCreateAgentToolPart(part)) {
-        const { task: fallbackTask, toolkits: fallbackToolkits } =
+        const { task: fallbackTask, toolkits } =
           extractCreateAgentMetadata(part);
-        return {
-          startIndex: i,
-          endIndex: Math.min(i + 5, parts.length - 1), // Conservative fallback
-          task: fallbackTask || "",
-          toolkits: fallbackToolkits,
-        };
+        fallbackBoundaries.push({
+          boundaryId: `fallback-${index}`,
+          startIndex: index,
+          endIndex: Math.min(index + 5, parts.length - 1),
+          task: fallbackTask ?? "",
+          toolkits,
+        });
       }
-    }
-    return null;
+    });
+
+    return fallbackBoundaries;
   }
 
-  return {
-    startIndex,
-    endIndex,
-    task,
-    toolkits,
-  };
+  return boundaries.sort((a, b) => a.startIndex - b.startIndex);
 };
 
 import {
@@ -907,62 +901,95 @@ const renderErrorPart = (part: ErrorUIPart, index: number) => {
   );
 };
 
-// Helper function to split parts based on create_agent tool boundaries
-const splitPartsByAgentBoundary = (parts: MessageType["parts"]) => {
-  // Input validation
-  if (!(parts && Array.isArray(parts))) {
-    return {
-      beforeAgent: [],
-      agentParts: [],
-      afterAgent: [],
-      agentBoundary: null,
-    };
+type NormalSegment = {
+  type: "normal";
+  parts: MessageType["parts"];
+  key: string;
+  startIndex: number;
+};
+
+type AgentSegment = {
+  type: "agent";
+  parts: MessageType["parts"];
+  key: string;
+  startIndex: number;
+  boundary: CreateAgentBoundary;
+};
+
+type MessageSegment = NormalSegment | AgentSegment;
+
+// Helper function to split parts based on create_agent tool boundaries (supports multiple agents)
+const segmentPartsByAgentBoundaries = (
+  parts: MessageType["parts"]
+): MessageSegment[] => {
+  if (!(parts && Array.isArray(parts)) || parts.length === 0) {
+    return [];
   }
 
-  const agentBoundary = findCreateAgentBoundary(parts);
+  const agentBoundaries = findCreateAgentBoundaries(parts);
 
-  if (!agentBoundary) {
-    // No agent boundary found, render all parts normally
-    return {
-      beforeAgent: parts,
-      agentParts: [],
-      afterAgent: [],
-      agentBoundary: null,
-    };
+  if (agentBoundaries.length === 0) {
+    return [
+      {
+        type: "normal",
+        parts,
+        key: "normal-0",
+        startIndex: 0,
+      },
+    ];
   }
 
-  const { startIndex, endIndex } = agentBoundary;
-  const allParts = parts;
+  const segments: MessageSegment[] = [];
+  let cursor = 0;
 
-  // Boundary validation
-  if (
-    startIndex < 0 ||
-    endIndex < 0 ||
-    startIndex >= allParts.length ||
-    endIndex >= allParts.length ||
-    startIndex > endIndex
-  ) {
-    // Fallback to treating all parts as non-agent content
-    return {
-      beforeAgent: allParts,
-      agentParts: [],
-      afterAgent: [],
-      agentBoundary: null,
-    };
+  agentBoundaries.forEach((boundary, boundaryIndex) => {
+    const segmentStart = Math.max(boundary.startIndex, cursor);
+    const segmentEnd = Math.max(boundary.endIndex, segmentStart - 1);
+
+    if (segmentStart > cursor) {
+      const normalParts = parts.slice(cursor, segmentStart);
+      if (normalParts.length > 0) {
+        segments.push({
+          type: "normal",
+          parts: normalParts,
+          key: `normal-${cursor}-${boundaryIndex}`,
+          startIndex: cursor,
+        });
+      }
+    }
+
+    if (segmentEnd >= segmentStart) {
+      const agentParts = parts.slice(segmentStart, segmentEnd + 1);
+      if (agentParts.length > 0) {
+        segments.push({
+          type: "agent",
+          parts: agentParts,
+          key: `agent-${boundary.boundaryId || boundaryIndex}`,
+          startIndex: segmentStart,
+          boundary,
+        });
+      }
+    }
+
+    cursor = Math.max(cursor, boundary.endIndex + 1);
+  });
+
+  if (cursor < parts.length) {
+    segments.push({
+      type: "normal",
+      parts: parts.slice(cursor),
+      key: `normal-${cursor}-final`,
+      startIndex: cursor,
+    });
   }
 
-  // Safe array slicing with bounds checking
-  const beforeAgent = startIndex > 0 ? allParts.slice(0, startIndex) : [];
-  const agentParts = allParts.slice(startIndex, endIndex + 1);
-  const afterAgent =
-    endIndex + 1 < allParts.length ? allParts.slice(endIndex + 1) : [];
+  return segments;
+};
 
-  return {
-    beforeAgent,
-    agentParts,
-    afterAgent,
-    agentBoundary,
-  };
+const agentSegmentHasEnd = (segment: AgentSegment): boolean => {
+  return segment.parts.some(
+    (part) => isAgentBoundaryPart(part) && part.data.type === "end"
+  );
 };
 
 function MessageAssistantInner({
@@ -982,9 +1009,17 @@ function MessageAssistantInner({
   // Prefer `parts` prop, but fall back to `attachments` if `parts` is undefined.
   const combinedParts = parts || [];
 
-  const { beforeAgent, agentParts, afterAgent, agentBoundary } = useMemo(
-    () => splitPartsByAgentBoundary(combinedParts),
+  const segments = useMemo(
+    () => segmentPartsByAgentBoundaries(combinedParts),
     [combinedParts]
+  );
+
+  const agentSegments = useMemo(
+    () =>
+      segments.filter(
+        (segment): segment is AgentSegment => segment.type === "agent"
+      ),
+    [segments]
   );
 
   // State for reasoning collapse/expand functionality - track each reasoning part individually
@@ -998,20 +1033,54 @@ function MessageAssistantInner({
   const initialStatusRef = useRef<Record<string, boolean>>({});
   const [isTouch, setIsTouch] = useState(false);
 
-  // Simple agent open state based on tool completion
-  const [agentOpen, setAgentOpen] = useState<boolean>(true);
-  const agentManualOverride = useRef<boolean>(false);
-
+  const [agentOpenStates, setAgentOpenStates] = useState<
+    Record<string, boolean>
+  >({});
+  const agentManualOverrides = useRef<Record<string, boolean>>({});
   useEffect(() => {
-    if (agentBoundary && !agentManualOverride.current) {
-      // Close the chain when the create_agent orchestration finishes producing output.
-      const hasCompleted = agentParts.some(
-        (part) => isCreateAgentToolPart(part) && toolInvocationCompleted(part)
-      );
-      const shouldAutoClose = hasCompleted && status !== "streaming";
-      setAgentOpen(!shouldAutoClose);
-    }
-  }, [agentBoundary, agentParts, status]);
+    setAgentOpenStates((previousState) => {
+      const activeKeys = new Set(agentSegments.map((segment) => segment.key));
+      for (const key of Object.keys(agentManualOverrides.current)) {
+        if (!activeKeys.has(key)) {
+          delete agentManualOverrides.current[key];
+        }
+      }
+
+      const nextState: Record<string, boolean> = {};
+
+      for (const segment of agentSegments) {
+        if (agentManualOverrides.current[segment.key]) {
+          const manualValue = previousState[segment.key];
+          nextState[segment.key] =
+            manualValue !== undefined
+              ? manualValue
+              : !agentSegmentHasEnd(segment);
+          continue;
+        }
+
+        nextState[segment.key] = !agentSegmentHasEnd(segment);
+      }
+
+      const previousKeys = Object.keys(previousState);
+      const nextKeys = Object.keys(nextState);
+
+      if (previousKeys.length !== nextKeys.length) {
+        return nextState;
+      }
+
+      for (const key of nextKeys) {
+        if (previousState[key] !== nextState[key]) {
+          return nextState;
+        }
+      }
+
+      if (previousKeys.length === 0 && nextKeys.length === 0) {
+        return previousState;
+      }
+
+      return previousState;
+    });
+  }, [agentSegments]);
 
   // Initialize reasoning states - only run once when reasoning parts are first detected
   useEffect(() => {
@@ -1142,48 +1211,62 @@ function MessageAssistantInner({
       <div className={cn("flex w-full flex-col gap-2", isLast && "pb-8")}>
         {/* Render parts in order: beforeAgent -> ChainOfThought(agentParts) -> afterAgent */}
 
-        {/* Render parts before agent normally */}
-        {beforeAgent.map((part, index) => {
-          const partKey = `before-${part.type}-${index}`;
-          return renderPartDirectly(
-            part,
-            index,
-            id,
-            partKey,
-            reasoningStates,
-            reasoningStreamingStates,
-            toggleReasoning
-          );
-        })}
+        {segments.flatMap((segment) => {
+          if (segment.type === "normal") {
+            return segment.parts.map((part, innerIndex) => {
+              const globalIndex = segment.startIndex + innerIndex;
+              const partKey = `${segment.key}-${part.type}-${innerIndex}`;
+              return renderPartDirectly(
+                part,
+                globalIndex,
+                id,
+                partKey,
+                reasoningStates,
+                reasoningStreamingStates,
+                toggleReasoning
+              );
+            });
+          }
 
-        {/* Render agent parts in Chain of Thought wrapper */}
-        {agentBoundary && (
-          <ChainOfThought
-            key={`agent-${agentBoundary.startIndex}`}
-            onOpenChange={(open) => {
-              agentManualOverride.current = true;
-              setAgentOpen(open);
-            }}
-            open={agentOpen}
-            tools={agentBoundary.toolkits}
-          >
-            <ChainOfThoughtHeader tools={agentBoundary.toolkits}>
-              {agentBoundary.task.trim()}
-            </ChainOfThoughtHeader>
-            <ChainOfThoughtContent>
-              {agentParts
-                .filter((part) => {
-                  // Filter out the create_agent orchestration parts; we only want its inner work steps.
-                  if (isCreateAgentToolPart(part)) {
-                    return false;
+          const storedOpen = agentOpenStates[segment.key];
+          const isOpen = storedOpen ?? !agentSegmentHasEnd(segment);
+
+          return [
+            <ChainOfThought
+              key={segment.key}
+              onOpenChange={(open) => {
+                agentManualOverrides.current[segment.key] = true;
+                setAgentOpenStates((previousState) => {
+                  if (previousState[segment.key] === open) {
+                    return previousState;
                   }
-                  return true;
-                })
-                .map((part, index) => {
-                  const partKey = `agent-${part.type}-${index}`;
+                  return {
+                    ...previousState,
+                    [segment.key]: open,
+                  };
+                });
+              }}
+              open={isOpen}
+              tools={segment.boundary.toolkits}
+            >
+              <ChainOfThoughtHeader tools={segment.boundary.toolkits}>
+                {segment.boundary.task.trim()}
+              </ChainOfThoughtHeader>
+              <ChainOfThoughtContent>
+                {segment.parts.map((part, innerIndex) => {
+                  if (
+                    isCreateAgentToolPart(part) ||
+                    part.type === "data-agent-boundary"
+                  ) {
+                    return null;
+                  }
+
+                  const globalIndex = segment.startIndex + innerIndex;
+                  const partKey = `${segment.key}-${part.type}-${innerIndex}`;
+
                   return renderPartInChainOfThought(
                     part,
-                    index,
+                    globalIndex,
                     id,
                     partKey,
                     reasoningStates,
@@ -1191,22 +1274,9 @@ function MessageAssistantInner({
                     toggleReasoning
                   );
                 })}
-            </ChainOfThoughtContent>
-          </ChainOfThought>
-        )}
-
-        {/* Render parts after agent normally */}
-        {afterAgent.map((part, index) => {
-          const partKey = `after-${part.type}-${index}`;
-          return renderPartDirectly(
-            part,
-            index,
-            id,
-            partKey,
-            reasoningStates,
-            reasoningStreamingStates,
-            toggleReasoning
-          );
+              </ChainOfThoughtContent>
+            </ChainOfThought>,
+          ];
         })}
 
         {/* Render sources list for non-search sources only */}

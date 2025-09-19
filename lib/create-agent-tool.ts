@@ -20,10 +20,18 @@ const createAgentInputSchema = z.object({
     .min(1, "Task description is required")
     .max(2000, "Task must be 2000 characters or less")
     .describe("High-level task for the delegated agent to complete."),
+  context: z
+    .string()
+    .max(5000, "Context must be 5000 characters or less")
+    .optional()
+    .describe(
+      "Optional context from previous operations to provide to the agent."
+    ),
 });
 
 export type CreateAgentInput = z.infer<typeof createAgentInputSchema> & {
   tool: string | string[];
+  context?: string;
 };
 
 type JSONValue =
@@ -77,7 +85,7 @@ export const createAgentTool = ({
       : "(no connectors available)";
 
   return tool<CreateAgentInput, string>({
-    description: `Create a temporary agent that can use specific connectors to complete a task. Provide the connectors via the \`tool\` field and the high-level goal via \`task\`. Available connectors: ${connectorListDescription}.`,
+    description: `Create a temporary agent that can use specific connectors to complete a task. Provide the connectors via the \`tool\` field, the high-level goal via \`task\`, and optional context from previous operations via \`context\`. Available connectors: ${connectorListDescription}.`,
     inputSchema: createAgentInputSchema,
     async execute(input) {
       const toolValues = Array.isArray(input.tool) ? input.tool : [input.tool];
@@ -135,17 +143,35 @@ export const createAgentTool = ({
         systemPrompt ??
         buildInnerSystemPrompt(input.task, requestedToolkits, connectorsStatus);
 
-      const agentUserMessage: UIMessage = {
+      // Build messages array based on whether context is provided
+      const messages: UIMessage[] = [];
+
+      // Add context message if provided
+      if (input.context) {
+        messages.push({
+          id: "create-agent-context",
+          role: "user",
+          parts: [
+            {
+              type: "text",
+              text: `Context from previous operations:\n\n${input.context}`,
+            },
+          ],
+        });
+      }
+
+      // Add task message
+      messages.push({
         id: "create-agent-task",
         role: "user",
         parts: [{ type: "text", text: input.task }],
-      };
+      });
 
       // Stream the agent's work using standard AI SDK streaming
       const result = streamText({
         model,
         system: innerSystem,
-        messages: convertToModelMessages([agentUserMessage]),
+        messages: convertToModelMessages(messages),
         tools: filteredTools,
         stopWhen: stepCountIs(maxSteps),
         providerOptions,
@@ -165,6 +191,7 @@ export const createAgentTool = ({
           timestamp: new Date().toISOString(),
           task: input.task,
           toolkits: requestedToolkits,
+          context: input.context,
         },
         transient: false, // Keep in message history for boundary detection
       });
