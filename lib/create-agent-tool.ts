@@ -29,6 +29,28 @@ const createAgentInputSchema = z.object({
     ),
 });
 
+// Structured output schema for agent results (for future use)
+const _agentResultSchema = z.object({
+  success: z.boolean().describe("Whether the task was completed successfully"),
+  summary: z
+    .string()
+    .max(200)
+    .describe("Concise summary of what was accomplished"),
+  toolsUsed: z
+    .array(z.string())
+    .describe("List of connector tools that were used"),
+  result: z.string().max(300).describe("Key outcome or result of the task"),
+  error: z.string().optional().describe("Error message if task failed"),
+  tokenUsage: z
+    .object({
+      inputTokens: z.number(),
+      outputTokens: z.number(),
+      totalTokens: z.number(),
+    })
+    .optional()
+    .describe("Token usage by the sub-agent"),
+});
+
 export type CreateAgentInput = z.infer<typeof createAgentInputSchema> & {
   tool: string | string[];
   context?: string;
@@ -87,6 +109,21 @@ export const createAgentTool = ({
   return tool<CreateAgentInput, string>({
     description: `Create a temporary agent that can use specific connectors to complete a task. Provide the connectors via the \`tool\` field, the high-level goal via \`task\`, and optional context from previous operations via \`context\`. Available connectors: ${connectorListDescription}.`,
     inputSchema: createAgentInputSchema,
+    toModelOutput: (result: string) => {
+      // Extract essential information for model context (dramatically reduces tokens)
+      const lowerResult = result.toLowerCase();
+      const isSuccess = !(
+        lowerResult.includes("error") ||
+        lowerResult.includes("failed") ||
+        lowerResult.includes("unable")
+      );
+
+      // Create concise summary for model context (~100-200 tokens vs 2000+)
+      const summary = `Agent ${isSuccess ? "successfully completed" : "attempted"} delegated task. Result: ${result.slice(0, 200)}${result.length > 200 ? "..." : ""}`;
+
+      // Return properly formatted content for model context
+      return { type: "text", value: summary };
+    },
     async execute(input) {
       const toolValues = Array.isArray(input.tool) ? input.tool : [input.tool];
 
@@ -167,6 +204,13 @@ export const createAgentTool = ({
         parts: [{ type: "text", text: input.task }],
       });
 
+      // Track sub-agent token usage
+      let agentTokenUsage = {
+        inputTokens: 0,
+        outputTokens: 0,
+        totalTokens: 0,
+      };
+
       // Stream the agent's work using standard AI SDK streaming
       const result = streamText({
         model,
@@ -175,6 +219,13 @@ export const createAgentTool = ({
         tools: filteredTools,
         stopWhen: stepCountIs(maxSteps),
         providerOptions,
+        onFinish({ usage }) {
+          agentTokenUsage = {
+            inputTokens: usage.inputTokens || 0,
+            outputTokens: usage.outputTokens || 0,
+            totalTokens: usage.totalTokens || 0,
+          };
+        },
       });
 
       // Generate unique boundary ID for this agent execution
@@ -212,6 +263,7 @@ export const createAgentTool = ({
           boundaryId,
           timestamp: new Date().toISOString(),
           result: finalText,
+          tokenUsage: agentTokenUsage,
         },
         transient: false, // Keep in message history for boundary detection
       });

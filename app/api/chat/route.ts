@@ -1082,16 +1082,6 @@ export async function POST(req: Request) {
           return; // Don't save if no result or error message was already saved
         }
 
-        const finalMetadata: Infer<typeof Message>["metadata"] = {
-          ...baseMetadata,
-          serverDurationMs: Date.now() - startTime,
-          inputTokens: finalUsage.inputTokens,
-          outputTokens: finalUsage.outputTokens,
-          totalTokens: finalUsage.totalTokens,
-          reasoningTokens: finalUsage.reasoningTokens,
-          cachedInputTokens: finalUsage.cachedInputTokens,
-        };
-
         const sanitizedParts = (responseMessage.parts ?? []).filter((part) => {
           if (!part || typeof part !== "object") {
             return true;
@@ -1099,6 +1089,53 @@ export async function POST(req: Request) {
 
           return (part as { transient?: unknown }).transient !== true;
         });
+
+        // Extract agent token usage from boundary markers and add to main usage
+        const additionalAgentTokens = {
+          inputTokens: 0,
+          outputTokens: 0,
+          totalTokens: 0,
+        };
+
+        const agentBoundaryParts = sanitizedParts.filter(
+          (part) => part.type === "data-agent-boundary"
+        );
+
+        for (const boundaryPart of agentBoundaryParts) {
+          // Type assertion for boundary parts with data property
+          const boundaryData = (
+            boundaryPart as {
+              data?: {
+                type?: string;
+                tokenUsage?: {
+                  inputTokens?: number;
+                  outputTokens?: number;
+                  totalTokens?: number;
+                };
+              };
+            }
+          ).data;
+          if (boundaryData?.type === "end" && boundaryData?.tokenUsage) {
+            const usage = boundaryData.tokenUsage;
+            additionalAgentTokens.inputTokens += usage.inputTokens || 0;
+            additionalAgentTokens.outputTokens += usage.outputTokens || 0;
+            additionalAgentTokens.totalTokens += usage.totalTokens || 0;
+          }
+        }
+
+        const finalMetadata: Infer<typeof Message>["metadata"] = {
+          ...baseMetadata,
+          serverDurationMs: Date.now() - startTime,
+          // Add agent tokens to main token counts for unified tracking
+          inputTokens:
+            finalUsage.inputTokens + additionalAgentTokens.inputTokens,
+          outputTokens:
+            finalUsage.outputTokens + additionalAgentTokens.outputTokens,
+          totalTokens:
+            finalUsage.totalTokens + additionalAgentTokens.totalTokens,
+          reasoningTokens: finalUsage.reasoningTokens,
+          cachedInputTokens: finalUsage.cachedInputTokens,
+        };
 
         const capturedText = sanitizedParts
           .filter((part) => part.type === "text")
