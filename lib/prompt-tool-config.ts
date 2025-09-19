@@ -48,7 +48,7 @@ Actions are configured through Config.NOTION_ACTIONS.
   googleCalendar: {
     content: `
 <google_calendar_guidelines>
-- Use "primary" as the calendar ID by default unless the user specifically mentions another calendar name.
+- Use "primary" as the calendarId by default unless the user specifically mentions another calendar name.
 - When the user mentions a specific calendar name, search for that calendar first before using it.
 - Always include the calendar ID in your responses when working with specific calendars.
 </google_calendar_guidelines>`.trim(),
