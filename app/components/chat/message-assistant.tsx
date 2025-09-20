@@ -1,6 +1,13 @@
 "use client";
 
 import type { UIMessage as MessageType } from "@ai-sdk/react";
+import {
+  ArrowClockwise,
+  Check,
+  Copy,
+  FilePdf,
+  GitBranch,
+} from "@phosphor-icons/react";
 import type {
   DynamicToolUIPart,
   FileUIPart,
@@ -9,12 +16,28 @@ import type {
   ToolUIPart,
 } from "ai";
 import type { Infer } from "convex/values";
+import dynamic from "next/dynamic"; // Client component – required when using React hooks in the app router
+import Image from "next/image";
+import React, { memo, useEffect, useMemo, useRef, useState } from "react"; // Import React to access memo
+import {
+  buildConnectorDisplayLabel,
+  ConnectorToolCall,
+} from "@/app/components/tool/connector_tool_call";
+import { UnifiedSearch } from "@/app/components/tool/web_search";
 import {
   ChainOfThought,
   ChainOfThoughtContent,
   ChainOfThoughtHeader,
   ChainOfThoughtStep,
 } from "@/components/ai-elements/chain-of-thought";
+import {
+  MorphingDialog,
+  MorphingDialogClose,
+  MorphingDialogContainer,
+  MorphingDialogContent,
+  MorphingDialogImage,
+  MorphingDialogTrigger,
+} from "@/components/motion-primitives/morphing-dialog";
 import { Loader } from "@/components/prompt-kit/loader";
 import {
   Message,
@@ -28,7 +51,14 @@ import {
   ReasoningTrigger,
 } from "@/components/prompt-kit/reasoning";
 import type { Message as MessageSchema } from "@/convex/schema/message";
+import {
+  getConnectorConfig,
+  getConnectorTypeFromToolName,
+  isConnectorTool,
+} from "@/lib/config/tools";
+import type { ConnectorType } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { SourcesList } from "./sources-list";
 
 // Error part type for rendering
 type ErrorUIPart = {
@@ -233,63 +263,25 @@ const findCreateAgentBoundaries = (
   return boundaries.sort((a, b) => a.startIndex - b.startIndex);
 };
 
-import {
-  ArrowClockwise,
-  Check,
-  Copy,
-  FilePdf,
-  GitBranch,
-} from "@phosphor-icons/react";
-import dynamic from "next/dynamic"; // Client component – required when using React hooks in the app router
-import Image from "next/image";
-
-import React, { memo, useEffect, useMemo, useRef, useState } from "react"; // Import React to access memo
-import {
-  buildConnectorDisplayLabel,
-  ConnectorToolCall,
-} from "@/app/components/tool/connector_tool_call";
-import { UnifiedSearch } from "@/app/components/tool/web_search";
-import {
-  MorphingDialog,
-  MorphingDialogClose,
-  MorphingDialogContainer,
-  MorphingDialogContent,
-  MorphingDialogImage,
-  MorphingDialogTrigger,
-} from "@/components/motion-primitives/morphing-dialog";
-import {
-  getConnectorConfig,
-  getConnectorTypeFromToolName,
-  isConnectorTool,
-} from "@/lib/config/tools";
-import type { ConnectorType } from "@/lib/types";
-import { SourcesList } from "./sources-list";
-
-// Stable key generation for React reconciliation
-const partKeyMap = new WeakMap<object, string>();
-
+// Kill the WeakMap and random ID generation entirely.
 function getStablePartKey(
   part: MessageType["parts"][number],
   fallback: string
 ): string {
   const anyPart = part as Record<string, unknown>;
 
-  // Prefer SDK-provided stable ids
-  const toolId = anyPart.toolCallId || anyPart.id || anyPart.callId || null;
+  // Prefer SDK-stable ids if present (your stream provides these: gen-..., toolCallId, etc.)
+  const stable =
+    (anyPart.toolCallId as string) ||
+    (anyPart.id as string) ||
+    (anyPart.callId as string);
 
-  if (toolId && typeof toolId === "string") {
-    return `part-${toolId}`;
+  if (stable) {
+    return `part-${stable}`;
   }
 
-  // Fallback: memoize a generated key for this object identity
-  if (!partKeyMap.has(part as object)) {
-    partKeyMap.set(
-      part as object,
-      `gen-${crypto.randomUUID?.() ?? Math.random().toString(36).slice(2)}`
-    );
-  }
-  const generatedKey = partKeyMap.get(part as object);
-  return generatedKey || fallback;
+  // Fall back to a deterministic caller-provided key (see next patches)
+  return fallback;
 }
 
 // Helper function to format model display with reasoning effort
@@ -606,11 +598,6 @@ const renderReasoningPart = (
 
 type ExtendedToolUIPart = ToolUIPart & { toolName?: string };
 
-const buildGenericToolLabel = (toolName: string): string => {
-  const cleaned = toolName.replace(/[_-]+/g, " ");
-  return `Engaging ${cleaned}`;
-};
-
 const renderToolPart = (part: ToolUIPart, index: number, _id: string) => {
   const extendedPart = part as ExtendedToolUIPart;
   const toolType = part.type.replace("tool-", "");
@@ -858,7 +845,7 @@ const renderPartInChainOfThought = (
                 getConnectorTypeFromToolName(toolType) as ConnectorType
               ).displayName
             )
-          : buildGenericToolLabel(toolType);
+          : toolType;
 
         return (
           <ChainOfThoughtStep key={partKey} label={toolLabel} status="complete">
@@ -1212,15 +1199,14 @@ function MessageAssistantInner({
         {segments.flatMap((segment) => {
           if (segment.type === "normal") {
             return segment.parts.map((part, innerIndex) => {
-              const globalIndex = segment.startIndex + innerIndex;
-              const fallbackKey = `${segment.key}-${part.type}-${globalIndex}`;
+              const fallbackKey = `${segment.key}-${innerIndex}`;
               const stableKey = getStablePartKey(part, fallbackKey);
 
               return (
                 <React.Fragment key={stableKey}>
                   {renderPartDirectly(
                     part,
-                    globalIndex,
+                    innerIndex,
                     id,
                     stableKey,
                     reasoningStates,
@@ -1265,13 +1251,12 @@ function MessageAssistantInner({
                     return null;
                   }
 
-                  const globalIndex = segment.startIndex + innerIndex;
-                  const fallbackKey = `${segment.key}-${part.type}-${globalIndex}`;
+                  const fallbackKey = `${segment.key}-${innerIndex}`;
                   const stepKey = getStablePartKey(part, fallbackKey);
 
                   return renderPartInChainOfThought(
                     part,
-                    globalIndex,
+                    innerIndex,
                     id,
                     stepKey,
                     reasoningStates,

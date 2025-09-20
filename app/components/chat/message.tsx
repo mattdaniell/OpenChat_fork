@@ -1,6 +1,6 @@
 import type { UIMessage as MessageType } from "@ai-sdk/react";
 import type { Infer } from "convex/values";
-import React, { useState } from "react";
+import React, { useCallback, useState } from "react";
 import type { Message as MessageSchema } from "@/convex/schema/message";
 import { MessageAssistant } from "./message-assistant";
 import { MessageUser } from "./message-user";
@@ -56,7 +56,7 @@ function MessageComponent({
 }: MessageProps) {
   const [copied, setCopied] = useState(false);
 
-  const copyToClipboard = () => {
+  const copyToClipboard = useCallback(() => {
     // Extract text content from parts for copying
     const textContent =
       parts
@@ -66,7 +66,7 @@ function MessageComponent({
     navigator.clipboard.writeText(textContent);
     setCopied(true);
     setTimeout(() => setCopied(false), 500);
-  };
+  }, [parts]);
 
   if (variant === "user") {
     return (

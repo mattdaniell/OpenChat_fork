@@ -13,6 +13,13 @@ import { ButtonDownload } from '../common/button-download';
 import { CodeBlock, CodeBlockCode, CodeBlockGroup } from './code-block';
 import { Source, SourceContent, SourceTrigger } from './source';
 
+// Move plugin arrays to module level to prevent recreation on every render
+const REMARK_PLUGINS = [remarkBreaks, remarkGfm, remarkMath];
+const REHYPE_PLUGINS = [rehypeKatex];
+
+// Move allowed prefixes to module level to prevent recreation
+const ALLOWED_PREFIXES = ['*'];
+
 export type MarkdownProps = {
   children: string;
   id?: string;
@@ -148,23 +155,28 @@ const MemoizedMarkdownBlock = memo(
   }) {
     // Check if content contains Mermaid diagrams
     const hasMermaid = content.includes('```mermaid') || content.includes('language-mermaid');
-    
-    // For Mermaid content, use components without the code override
-    const componentsToUse = hasMermaid ? {
-      pre({ children }: { children?: React.ReactNode }) {
-        return <>{children}</>;
-      },
-      a: components.a, // Keep the link component
-    } as Partial<Components> : components;
+
+    // Memoize components to prevent recreation on every render
+    const componentsToUse = useMemo(() => {
+      if (hasMermaid) {
+        return {
+          pre({ children }: { children?: React.ReactNode }) {
+            return <>{children}</>;
+          },
+          a: components.a, // Keep the link component
+        } as Partial<Components>;
+      }
+      return components;
+    }, [hasMermaid, components]);
 
     return (
       <Streamdown
-        allowedImagePrefixes={['*']}
-        allowedLinkPrefixes={['*']}
+        allowedImagePrefixes={ALLOWED_PREFIXES}
+        allowedLinkPrefixes={ALLOWED_PREFIXES}
         components={componentsToUse}
         parseIncompleteMarkdown={true}
-        rehypePlugins={[rehypeKatex]}
-        remarkPlugins={[remarkBreaks, remarkGfm, remarkMath]}
+        rehypePlugins={REHYPE_PLUGINS}
+        remarkPlugins={REMARK_PLUGINS}
       >
         {content}
       </Streamdown>
