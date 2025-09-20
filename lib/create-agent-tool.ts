@@ -76,6 +76,67 @@ type CreateAgentToolOptions = {
   writer: UIMessageStreamWriter;
 };
 
+type SubAgentAnalysis = {
+  success: boolean;
+  toolCallCount: number;
+  toolNames: string[];
+  finishReason: string;
+  issues: string[];
+  summary: string;
+  errorMessage?: string;
+};
+
+const analyzeSubAgentExecution = ({
+  toolCalls,
+  finishReason,
+  finalText,
+  subAgentError,
+}: {
+  toolCalls: { toolName: string; [key: string]: unknown }[];
+  finishReason: string;
+  finalText: string;
+  subAgentError: Error | null;
+}): SubAgentAnalysis => {
+  const toolCallCount = toolCalls.length;
+  const toolNames = toolCalls.map((tc) => tc.toolName);
+
+  // Determine completion status
+  const attemptedTools = toolCallCount > 0;
+  const normalFinish = finishReason === "stop" || finishReason === "length";
+  const hasSubstantialOutput = finalText.length > 25;
+  const hasError = subAgentError !== null;
+
+  const success =
+    attemptedTools && normalFinish && hasSubstantialOutput && !hasError;
+
+  const issues: string[] = [];
+  if (hasError) {
+    issues.push(`Error: ${subAgentError?.message || "Unknown error"}`);
+  }
+  if (!attemptedTools) {
+    issues.push("No tools were called");
+  }
+  if (finishReason === "error") {
+    issues.push("Sub-agent encountered an error");
+  }
+  if (finishReason === "tool-calls") {
+    issues.push("Sub-agent stopped mid-execution");
+  }
+  if (!hasSubstantialOutput) {
+    issues.push("Insufficient output produced");
+  }
+
+  return {
+    success,
+    toolCallCount,
+    toolNames,
+    finishReason,
+    issues,
+    summary: finalText.slice(0, 300),
+    errorMessage: subAgentError?.message,
+  };
+};
+
 const buildInnerSystemPrompt = (
   task: string,
   requestedToolkits: string[],
@@ -124,19 +185,28 @@ export const createAgentTool = ({
     description: `Create a temporary agent that can use specific connectors to complete a task. Provide the connectors via the \`tool\` field, the high-level goal via \`task\`, and optional context from previous operations via \`context\`. Available connectors: ${connectorListDescription}.`,
     inputSchema: createAgentInputSchema,
     toModelOutput: (result: string) => {
-      // Extract essential information for model context (dramatically reduces tokens)
-      const lowerResult = result.toLowerCase();
-      const isSuccess = !(
-        lowerResult.includes("error") ||
-        lowerResult.includes("failed") ||
-        lowerResult.includes("unable")
-      );
+      try {
+        const analysis: SubAgentAnalysis = JSON.parse(result);
 
-      // Create concise summary for model context (~100-200 tokens vs 2000+)
-      const summary = `Agent ${isSuccess ? "successfully completed" : "attempted"} delegated task. Result: ${result.slice(0, 200)}${result.length > 200 ? "..." : ""}`;
+        if (!analysis.success) {
+          const issueDetails = analysis.issues.join("; ");
+          return {
+            type: "text",
+            value: `Sub-agent failed to complete task. Issues: ${issueDetails}. Tools called: ${analysis.toolCallCount} (${analysis.toolNames.join(", ") || "none"}). Finish reason: ${analysis.finishReason}. Consider different approach or retry.`,
+          };
+        }
 
-      // Return properly formatted content for model context
-      return { type: "text", value: summary };
+        return {
+          type: "text",
+          value: `Sub-agent completed task successfully. Used tools: ${analysis.toolNames.join(", ") || "none"} (${analysis.toolCallCount} calls). Result: ${analysis.summary.slice(0, 150)}${analysis.summary.length > 150 ? "..." : ""}`,
+        };
+      } catch (_error) {
+        // Fallback for any parsing errors - should not happen with new implementation
+        return {
+          type: "text",
+          value: `Sub-agent execution completed but analysis failed. Raw result: ${result.slice(0, 200)}${result.length > 200 ? "..." : ""}`,
+        };
+      }
     },
     async execute(input) {
       const toolValues = Array.isArray(input.tool) ? input.tool : [input.tool];
@@ -218,12 +288,13 @@ export const createAgentTool = ({
         parts: [{ type: "text", text: input.task }],
       });
 
-      // Track sub-agent token usage
+      // Track sub-agent token usage and error state
       let agentTokenUsage = {
         inputTokens: 0,
         outputTokens: 0,
         totalTokens: 0,
       };
+      let subAgentError: Error | null = null;
 
       // Stream the agent's work using standard AI SDK streaming
       const result = streamText({
@@ -234,6 +305,10 @@ export const createAgentTool = ({
         stopWhen: stepCountIs(maxSteps),
         providerOptions,
         // toolChoice: "required",
+        onError: ({ error }) => {
+          subAgentError =
+            error instanceof Error ? error : new Error(String(error));
+        },
         onFinish({ usage }) {
           agentTokenUsage = {
             inputTokens: usage.inputTokens || 0,
@@ -265,10 +340,30 @@ export const createAgentTool = ({
       // Let AI SDK handle all the streaming naturally
       writer.merge(result.toUIMessageStream());
 
-      // Wait for completion and return result
-      const finalText = (await result.text).trim();
+      // Collect text output from the stream and get tool execution information
+      let finalText = "";
+      for await (const textPart of result.textStream) {
+        finalText += textPart;
+      }
 
-      // Inject end boundary marker
+      // Get tool execution information (these are Promises)
+      const [steps, finishReason] = await Promise.all([
+        result.steps,
+        result.finishReason,
+      ]);
+
+      // Collect all tool calls from all steps (not just the last one)
+      const toolCalls = steps.flatMap((step) => step.toolCalls || []);
+
+      // Analyze what the sub-agent actually did
+      const analysis = analyzeSubAgentExecution({
+        toolCalls,
+        finishReason,
+        finalText: finalText.trim(),
+        subAgentError,
+      });
+
+      // Inject end boundary marker with analysis
       writer.write({
         type: "data-agent-boundary",
         id: `${boundaryId}-end`,
@@ -277,14 +372,20 @@ export const createAgentTool = ({
           agentId: "create_agent",
           boundaryId,
           timestamp: new Date().toISOString(),
-          result: finalText,
+          analysis,
+          toolSummary: {
+            toolsUsed: analysis.toolNames,
+            toolCallCount: analysis.toolCallCount,
+            finishReason: analysis.finishReason,
+            success: analysis.success,
+          },
           tokenUsage: agentTokenUsage,
         },
         transient: false, // Keep in message history for boundary detection
       });
-      return finalText.length > 0
-        ? finalText
-        : "Delegated agent completed without additional commentary.";
+
+      // Return structured analysis as JSON for toModelOutput processing
+      return JSON.stringify(analysis);
     },
   });
 };
