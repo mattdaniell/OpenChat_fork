@@ -5,6 +5,7 @@
 import { ConvexError } from "convex/values";
 import { z } from "zod";
 import { ERROR_CODES, type ErrorCode, getErrorMessage } from "./error-codes";
+import type { DetectedError } from "./provider-error-detector";
 
 export type ErrorDisplayType = "conversation" | "toast" | "both";
 
@@ -23,6 +24,20 @@ const ConvexRateLimitErrorSchema = z.object({
  */
 function isConvexError(error: unknown): error is ConvexError<string> {
   return error instanceof ConvexError;
+}
+
+/**
+ * Type guard to check if an error is a DetectedError from provider error detection
+ */
+function isDetectedError(error: unknown): error is DetectedError {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "type" in error &&
+    "provider" in error &&
+    "message" in error &&
+    "userFriendlyMessage" in error
+  );
 }
 
 export type ClassifiedError = {
@@ -76,6 +91,30 @@ function getHttpStatusForErrorCode(code: string): number {
     case ERROR_CODES.UPLOAD_FAILED:
       return 500;
 
+    // Connector errors
+    case ERROR_CODES.CONNECTION_NOT_FOUND:
+      return 404;
+    case ERROR_CODES.CONNECTOR_NOT_SUPPORTED:
+      return 400;
+    case ERROR_CODES.CONNECTOR_AUTH_FAILED:
+      return 401;
+    case ERROR_CODES.CONNECTION_FAILED:
+    case ERROR_CODES.CONNECTION_TIMEOUT:
+      return 500;
+
+    // Streaming errors
+    case ERROR_CODES.PROVIDER_STREAM_RATE_LIMIT:
+    case ERROR_CODES.PROVIDER_STREAM_THROTTLED:
+    case ERROR_CODES.PROVIDER_STREAM_RESOURCE_EXHAUSTED:
+      return 429;
+    case ERROR_CODES.PROVIDER_STREAM_QUOTA_EXCEEDED:
+    case ERROR_CODES.PROVIDER_STREAM_INSUFFICIENT_BALANCE:
+      return 402;
+    case ERROR_CODES.PROVIDER_STREAM_AUTH_ERROR:
+      return 401;
+    case ERROR_CODES.PROVIDER_STREAM_TIMEOUT:
+      return 408;
+
     default:
       return 500;
   }
@@ -128,6 +167,34 @@ function getResponseTypeForErrorCode(code: string): string {
     case ERROR_CODES.UPLOAD_FAILED:
       return "upload_failed";
 
+    // Connector errors
+    case ERROR_CODES.CONNECTION_FAILED:
+      return "connection_failed";
+    case ERROR_CODES.CONNECTION_NOT_FOUND:
+      return "connection_not_found";
+    case ERROR_CODES.CONNECTION_TIMEOUT:
+      return "connection_timeout";
+    case ERROR_CODES.CONNECTOR_NOT_SUPPORTED:
+      return "connector_not_supported";
+    case ERROR_CODES.CONNECTOR_AUTH_FAILED:
+      return "connector_auth_failed";
+
+    // Streaming errors
+    case ERROR_CODES.PROVIDER_STREAM_RATE_LIMIT:
+      return "provider_rate_limit";
+    case ERROR_CODES.PROVIDER_STREAM_QUOTA_EXCEEDED:
+      return "provider_quota_exceeded";
+    case ERROR_CODES.PROVIDER_STREAM_INSUFFICIENT_BALANCE:
+      return "provider_insufficient_balance";
+    case ERROR_CODES.PROVIDER_STREAM_AUTH_ERROR:
+      return "provider_auth_error";
+    case ERROR_CODES.PROVIDER_STREAM_TIMEOUT:
+      return "provider_timeout";
+    case ERROR_CODES.PROVIDER_STREAM_THROTTLED:
+      return "provider_throttled";
+    case ERROR_CODES.PROVIDER_STREAM_RESOURCE_EXHAUSTED:
+      return "provider_resource_exhausted";
+
     default:
       return "unknown_error";
   }
@@ -137,7 +204,13 @@ function getResponseTypeForErrorCode(code: string): string {
  * Classify an error and determine how it should be displayed
  */
 export function classifyError(error: unknown): ClassifiedError {
-  // Handle ConvexError first (our new standardized errors)
+  // Handle DetectedError from provider error detection first
+  if (isDetectedError(error)) {
+    // Use the existing classifyStreamingError function which handles DetectedError properly
+    return classifyStreamingError(error);
+  }
+
+  // Handle ConvexError second (our new standardized errors)
   if (isConvexError(error)) {
     const errorCode = error.data as ErrorCode;
     const userFriendlyMessage = getErrorMessage(errorCode);
@@ -286,5 +359,67 @@ export function shouldShowAsToast(error: unknown): boolean {
   const classified = classifyError(error);
   return (
     classified.displayType === "toast" || classified.displayType === "both"
+  );
+}
+
+/**
+ * Create a classified error from a detected streaming error
+ */
+export function classifyStreamingError(detectedError: {
+  type: string;
+  provider: string;
+  message: string;
+  userFriendlyMessage: string;
+  isRateLimit?: boolean;
+  isQuotaExceeded?: boolean;
+  isInsufficientBalance?: boolean;
+  isAuthError?: boolean;
+}): ClassifiedError {
+  // Map detected error types to error codes
+  let code: string;
+  if (detectedError.isRateLimit) {
+    code = "PROVIDER_STREAM_RATE_LIMIT";
+  } else if (detectedError.isQuotaExceeded) {
+    code = "PROVIDER_STREAM_QUOTA_EXCEEDED";
+  } else if (detectedError.isInsufficientBalance) {
+    code = "PROVIDER_STREAM_INSUFFICIENT_BALANCE";
+  } else if (detectedError.isAuthError) {
+    code = "PROVIDER_STREAM_AUTH_ERROR";
+  } else {
+    code = "PROVIDER_STREAM_THROTTLED";
+  }
+
+  // Determine display type - streaming errors should be shown in conversation
+  const displayType: ErrorDisplayType = "conversation";
+
+  return {
+    displayType,
+    code,
+    message: detectedError.message,
+    userFriendlyMessage: detectedError.userFriendlyMessage,
+    httpStatus: getHttpStatusForErrorCode(code),
+    responseType: getResponseTypeForErrorCode(code),
+    originalError: detectedError,
+  };
+}
+
+/**
+ * Create an ErrorUIPart from a detected streaming error
+ */
+export function createErrorPartFromDetectedError(detectedError: {
+  type: string;
+  provider: string;
+  message: string;
+  userFriendlyMessage: string;
+  isRateLimit?: boolean;
+  isQuotaExceeded?: boolean;
+  isInsufficientBalance?: boolean;
+  isAuthError?: boolean;
+}) {
+  const classified = classifyStreamingError(detectedError);
+  return createErrorPart(
+    classified.code,
+    classified.userFriendlyMessage,
+    detectedError.message
   );
 }

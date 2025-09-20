@@ -9,6 +9,31 @@ import { TRANSITION_LAYOUT } from "@/lib/motion";
 import type { ConnectorType } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
+// Connector action labels for better UX
+export const CONNECTOR_ACTION_LABELS: Partial<Record<ConnectorType, string>> = {
+  googlecalendar: "Consulting",
+  googledocs: "Drafting in",
+  googledrive: "Syncing with",
+  googlesheets: "Updating",
+  slack: "Messaging via",
+  linear: "Triaging in",
+  github: "Reviewing on",
+  twitter: "Broadcasting to",
+  gmail: "Checking with",
+  notion: "Working with",
+};
+
+export const buildConnectorDisplayLabel = (
+  connectorType: ConnectorType,
+  displayName: string
+): string => {
+  const prefix = CONNECTOR_ACTION_LABELS[connectorType];
+  if (prefix) {
+    return `${prefix} ${displayName}`;
+  }
+  return `Working with ${displayName}`;
+};
+
 // Types for connector tool calls
 type ConnectorToolCallData = {
   toolName: string;
@@ -153,11 +178,13 @@ export const ConnectorToolCall = memo<ConnectorToolCallProps>(
     );
 
     const displayText = useMemo(() => {
+      // Show the raw tool action name instead of descriptive label
+      const toolActionName = data.request?.action || data.toolName;
       if (isLoading) {
-        return `Executing ${data.toolName}...`;
+        return `${toolActionName}...`;
       }
-      return data.request?.action || data.toolName;
-    }, [isLoading, data.toolName, data.request?.action]);
+      return toolActionName;
+    }, [isLoading, data.request?.action, data.toolName]);
 
     const statusText = useMemo(() => {
       if (isLoading) {

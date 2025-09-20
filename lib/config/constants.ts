@@ -19,7 +19,7 @@ export const RECOMMENDED_MODELS = [
   "gpt-5",
   "gpt-5-mini",
   "gpt-5-nano",
-  "o4-mini",
+  "x-ai/grok-4-fast",
   "gpt-image-1",
   "claude-4-sonnet",
   "claude-4-sonnet-reasoning",

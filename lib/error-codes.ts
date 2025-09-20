@@ -43,6 +43,24 @@ export const FILE_ERRORS = {
   UPLOAD_FAILED: "UPLOAD_FAILED",
 } as const;
 
+export const CONNECTOR_ERRORS = {
+  CONNECTION_FAILED: "CONNECTION_FAILED",
+  CONNECTION_NOT_FOUND: "CONNECTION_NOT_FOUND",
+  CONNECTION_TIMEOUT: "CONNECTION_TIMEOUT",
+  CONNECTOR_NOT_SUPPORTED: "CONNECTOR_NOT_SUPPORTED",
+  CONNECTOR_AUTH_FAILED: "CONNECTOR_AUTH_FAILED",
+} as const;
+
+export const STREAMING_ERRORS = {
+  PROVIDER_STREAM_RATE_LIMIT: "PROVIDER_STREAM_RATE_LIMIT",
+  PROVIDER_STREAM_QUOTA_EXCEEDED: "PROVIDER_STREAM_QUOTA_EXCEEDED",
+  PROVIDER_STREAM_INSUFFICIENT_BALANCE: "PROVIDER_STREAM_INSUFFICIENT_BALANCE",
+  PROVIDER_STREAM_AUTH_ERROR: "PROVIDER_STREAM_AUTH_ERROR",
+  PROVIDER_STREAM_TIMEOUT: "PROVIDER_STREAM_TIMEOUT",
+  PROVIDER_STREAM_THROTTLED: "PROVIDER_STREAM_THROTTLED",
+  PROVIDER_STREAM_RESOURCE_EXHAUSTED: "PROVIDER_STREAM_RESOURCE_EXHAUSTED",
+} as const;
+
 // Combined error codes for easy import
 export const ERROR_CODES = {
   ...AUTH_ERRORS,
@@ -50,6 +68,8 @@ export const ERROR_CODES = {
   ...RATE_LIMIT_ERRORS,
   ...BUSINESS_ERRORS,
   ...FILE_ERRORS,
+  ...CONNECTOR_ERRORS,
+  ...STREAMING_ERRORS,
 } as const;
 
 // Type for all error codes
@@ -109,6 +129,34 @@ export function getErrorMessage(code: ErrorCode): string {
       return "File is too large. Please upload a smaller file.";
     case ERROR_CODES.UPLOAD_FAILED:
       return "File upload failed. Please try again.";
+
+    // Connector errors
+    case ERROR_CODES.CONNECTION_FAILED:
+      return "Failed to establish connection. Please try again.";
+    case ERROR_CODES.CONNECTION_NOT_FOUND:
+      return "Connection not found. Please reconnect the service.";
+    case ERROR_CODES.CONNECTION_TIMEOUT:
+      return "Connection timed out. Please try again.";
+    case ERROR_CODES.CONNECTOR_NOT_SUPPORTED:
+      return "This connector is not supported.";
+    case ERROR_CODES.CONNECTOR_AUTH_FAILED:
+      return "Authentication failed for this connector. Please reconnect.";
+
+    // Streaming errors
+    case ERROR_CODES.PROVIDER_STREAM_RATE_LIMIT:
+      return "API rate limit exceeded. Please wait a moment before trying again.";
+    case ERROR_CODES.PROVIDER_STREAM_QUOTA_EXCEEDED:
+      return "API quota exceeded. Please check your billing or add credits to your account.";
+    case ERROR_CODES.PROVIDER_STREAM_INSUFFICIENT_BALANCE:
+      return "Insufficient API credits. Please add credits to your account.";
+    case ERROR_CODES.PROVIDER_STREAM_AUTH_ERROR:
+      return "Invalid API key. Please check your API key in settings.";
+    case ERROR_CODES.PROVIDER_STREAM_TIMEOUT:
+      return "API request timed out. Please try again.";
+    case ERROR_CODES.PROVIDER_STREAM_THROTTLED:
+      return "API is experiencing high load. Please try again in a moment.";
+    case ERROR_CODES.PROVIDER_STREAM_RESOURCE_EXHAUSTED:
+      return "API resources exhausted. Please wait before retrying.";
 
     default:
       return "An unexpected error occurred. Please try again.";

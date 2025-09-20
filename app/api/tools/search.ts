@@ -1,5 +1,6 @@
 import { tool } from "ai";
 import { z } from "zod";
+import { classifyError } from "@/lib/error-utils";
 import { searchWithFallback } from "./search-provider-factory";
 import {
   type ExaSearchCategory,
@@ -136,13 +137,13 @@ export const searchTool = tool({
       };
     } catch (error) {
       // Return error response that can be handled gracefully
+      const classified = classifyError(error);
       return {
         success: false,
         query,
         results: [],
         count: 0,
-        error:
-          error instanceof Error ? error.message : "Unknown error occurred",
+        error: classified.userFriendlyMessage,
       };
     }
   },

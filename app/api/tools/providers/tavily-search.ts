@@ -1,3 +1,4 @@
+import { handleSearchError } from "../search-errors";
 import {
   PROVIDER_LIMITS,
   SEARCH_CONFIG,
@@ -68,9 +69,7 @@ export class TavilySearchProvider implements SearchAdapter {
 
       return this.formatResults(data.results || [], scrapeContent);
     } catch (error) {
-      throw new Error(
-        `Failed to search with Tavily: ${error instanceof Error ? error.message : "Unknown error"}`
-      );
+      handleSearchError(error, "tavily");
     }
   }
 

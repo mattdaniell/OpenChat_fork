@@ -3,8 +3,14 @@
 import { CaretDown, Globe, SpinnerGap } from "@phosphor-icons/react";
 import type { SourceUrlUIPart } from "ai";
 import { motion } from "motion/react";
-import Image from "next/image";
-import { memo, useCallback, useMemo, useState } from "react";
+import {
+  memo,
+  useCallback,
+  useDeferredValue,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { TRANSITION_LAYOUT } from "@/lib/motion";
 import { cn } from "@/lib/utils";
 
@@ -20,10 +26,19 @@ type UnifiedSearchProps = {
   isLoading?: boolean;
 };
 
-const getFavicon = (url: string) => {
-  const domain = new URL(url).hostname;
-  return `https://www.google.com/s2/favicons?domain=${domain}&sz=32`;
+// Domain-only favicon helper (cache-friendly across app)
+const domainFromUrl = (url: string) => {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return "";
+  }
 };
+
+const faviconForDomain = (domain: string, sz = 32) =>
+  `https://www.google.com/s2/favicons?domain=${domain}&sz=${sz}`;
+
+const getFavicon = (url: string) => faviconForDomain(domainFromUrl(url), 32);
 
 const formatUrl = (url: string) => {
   try {
@@ -62,19 +77,19 @@ const SearchResultItem = memo<{
       >
         <div className="flex min-w-0 flex-row items-center gap-2">
           <div className="flex h-5 w-5 shrink-0 items-center justify-center">
-            <Image
+            {/* biome-ignore lint/performance/noImgElement: Favicons should use native img for better caching */}
+            <img
               alt="favicon"
               className="rounded-sm opacity-100 transition duration-500"
               decoding="async"
               height={16}
-              loader={({ src }) => src}
               loading="lazy"
+              referrerPolicy="no-referrer"
               src={faviconUrl}
               style={{
                 maxWidth: "16px",
                 maxHeight: "16px",
               }}
-              unoptimized
               width={16}
             />
           </div>
@@ -96,16 +111,46 @@ export const UnifiedSearch = memo<UnifiedSearchProps>(
   ({ query, sources = [], className, isLoading = false }) => {
     const [isExpanded, setIsExpanded] = useState(false);
 
+    // 1) Defer sources so we render fewer frames during streaming
+    const deferredSources = useDeferredValue(sources);
+
+    // 2) Keep item object identity stable across renders by sourceId
+    const stableMapRef = useRef<Map<string, SourceUrlUIPart>>(new Map());
+    const stableSources = useMemo(() => {
+      const map = stableMapRef.current;
+      const next: SourceUrlUIPart[] = [];
+      for (const s of deferredSources) {
+        const prev = map.get(s.sourceId);
+        // Reuse previous object if the visible fields haven't changed
+        if (prev && prev.url === s.url && prev.title === s.title) {
+          next.push(prev);
+        } else {
+          map.set(s.sourceId, s);
+          next.push(s);
+        }
+      }
+      // Optionally prune removed ids
+      if (map.size > next.length) {
+        const keep = new Set(next.map((s) => s.sourceId));
+        for (const k of map.keys()) {
+          if (!keep.has(k)) {
+            map.delete(k);
+          }
+        }
+      }
+      return next;
+    }, [deferredSources]);
+
     // Memoized early returns to prevent unnecessary computations
     const shouldRender = useMemo(() => {
       if (!query) {
         return false;
       }
-      if (!isLoading && sources.length === 0) {
+      if (!isLoading && stableSources.length === 0) {
         return false;
       }
       return true;
-    }, [query, isLoading, sources.length]);
+    }, [query, isLoading, stableSources.length]);
 
     // Memoized values to prevent recalculation on every render
     const displayText = useMemo(() => {
@@ -113,8 +158,8 @@ export const UnifiedSearch = memo<UnifiedSearchProps>(
     }, [isLoading, query]);
 
     const resultText = useMemo(() => {
-      return `${sources.length} result${sources.length !== 1 ? "s" : ""}`;
-    }, [sources.length]);
+      return `${stableSources.length} result${stableSources.length !== 1 ? "s" : ""}`;
+    }, [stableSources.length]);
 
     const buttonClassName = useMemo(() => {
       return cn(
@@ -185,7 +230,7 @@ export const UnifiedSearch = memo<UnifiedSearchProps>(
           </button>
 
           {/* Collapsible Results - Only show when not loading and has sources */}
-          {!isLoading && sources.length > 0 && (
+          {!isLoading && stableSources.length > 0 && (
             <motion.div
               animate={{
                 height: isExpanded ? "auto" : 0,
@@ -197,18 +242,22 @@ export const UnifiedSearch = memo<UnifiedSearchProps>(
                 opacity: isExpanded ? 1 : 0,
               }}
               tabIndex={-1}
-              transition={TRANSITION_LAYOUT}
+              transition={isLoading ? { duration: 0 } : TRANSITION_LAYOUT}
             >
               <div className="bg-gradient-to-b from-transparent via-transparent to-transparent">
                 <div
                   className="scrollbar-hide h-full max-h-[238px] overflow-y-auto overflow-x-hidden"
+                  style={{
+                    contentVisibility: "auto",
+                    containIntrinsicSize: "238px 100%",
+                  }}
                   tabIndex={-1}
                 >
                   <div
                     className="flex flex-col flex-nowrap p-2 pt-0"
                     tabIndex={-1}
                   >
-                    {sources.map((source) => (
+                    {stableSources.map((source) => (
                       <SearchResultItem key={source.sourceId} source={source} />
                     ))}
                   </div>
@@ -219,7 +268,13 @@ export const UnifiedSearch = memo<UnifiedSearchProps>(
         </div>
       </div>
     );
-  }
+  },
+  // 3) Tight comparator: only re-render if query or sources ref changes
+  (a, b) =>
+    a.query === b.query &&
+    a.isLoading === b.isLoading &&
+    a.sources === b.sources &&
+    a.className === b.className
 );
 
 UnifiedSearch.displayName = "UnifiedSearch";

@@ -3,6 +3,7 @@ import { fetchQuery } from "convex/nextjs";
 import { NextResponse } from "next/server";
 import { api } from "@/convex/_generated/api";
 import { waitForConnection } from "@/lib/composio-server";
+import { createErrorResponse } from "@/lib/error-utils";
 
 export async function GET(request: Request) {
   try {
@@ -37,20 +38,9 @@ export async function GET(request: Request) {
 
       return NextResponse.json(result);
     } catch (error) {
-      if (error instanceof Error && "code" in error) {
-        // Handle Composio specific errors
-        return NextResponse.json({ error: error.message }, { status: 400 });
-      }
-
-      return NextResponse.json(
-        { error: "Connection not found or failed" },
-        { status: 404 }
-      );
+      return createErrorResponse(error);
     }
-  } catch (_error) {
-    return NextResponse.json(
-      { error: "Failed to check connection status" },
-      { status: 500 }
-    );
+  } catch (error) {
+    return createErrorResponse(error);
   }
 }

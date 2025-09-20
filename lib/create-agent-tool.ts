@@ -1,0 +1,366 @@
+import type { Tool, UIMessage, UIMessageStreamWriter } from "ai";
+import { convertToModelMessages, stepCountIs, streamText, tool } from "ai";
+import { z } from "zod";
+import { getComposioTools } from "@/lib/composio-server";
+import type { ConnectorStatusLists } from "@/lib/connector-utils";
+import { getToolSpecificPrompts } from "@/lib/prompt-tool-config";
+
+const toolNameSchema = z.string().min(1, "Tool name is required");
+
+const toolListSchema = z.union([
+  toolNameSchema,
+  z.array(toolNameSchema).min(1, "At least one tool is required"),
+]);
+
+const createAgentInputSchema = z.object({
+  tool: toolListSchema.describe(
+    'One or more connector toolkits to enable (e.g. "GMAIL", "NOTION").'
+  ),
+  task: z
+    .string()
+    .min(1, "Task description is required")
+    .max(2000, "Task must be 2000 characters or less")
+    .describe("High-level task for the delegated agent to complete."),
+  context: z
+    .string()
+    .max(5000, "Context must be 5000 characters or less")
+    .optional()
+    .describe(
+      "Optional context from previous operations to provide to the agent."
+    ),
+});
+
+export type CreateAgentInput = z.input<typeof createAgentInputSchema>;
+
+type JSONValue =
+  | string
+  | number
+  | boolean
+  | null
+  | { [key: string]: JSONValue }
+  | JSONValue[];
+
+type CreateAgentToolOptions = {
+  userId?: string;
+  availableToolkits: string[];
+  model: string;
+  systemPrompt?: string;
+  maxSteps?: number;
+  providerOptions?: Record<string, Record<string, JSONValue>>;
+  connectorsStatus?: ConnectorStatusLists;
+  writer: UIMessageStreamWriter;
+};
+
+type SubAgentAnalysis = {
+  success: boolean;
+  toolCallCount: number;
+  toolNames: string[];
+  finishReason: string;
+  issues: string[];
+  summary: string;
+  errorMessage?: string;
+};
+
+const analyzeSubAgentExecution = ({
+  toolCalls,
+  finishReason,
+  finalText,
+  subAgentError,
+}: {
+  toolCalls: { toolName: string; [key: string]: unknown }[];
+  finishReason: string;
+  finalText: string;
+  subAgentError: Error | null;
+}): SubAgentAnalysis => {
+  const toolCallCount = toolCalls.length;
+  const toolNames = toolCalls.map((tc) => tc.toolName);
+
+  // Determine completion status
+  const attemptedTools = toolCallCount > 0;
+  const normalFinish = finishReason === "stop" || finishReason === "length";
+  const hasSubstantialOutput = finalText.length > 25;
+  const hasError = subAgentError !== null;
+
+  const success =
+    attemptedTools && normalFinish && hasSubstantialOutput && !hasError;
+
+  const issues: string[] = [];
+  if (hasError) {
+    issues.push(`Error: ${subAgentError?.message || "Unknown error"}`);
+  }
+  if (!attemptedTools) {
+    issues.push("No tools were called");
+  }
+  if (finishReason === "error") {
+    issues.push("Sub-agent encountered an error");
+  }
+  if (finishReason === "tool-calls") {
+    issues.push("Sub-agent stopped mid-execution");
+  }
+  if (!hasSubstantialOutput) {
+    issues.push("Insufficient output produced");
+  }
+
+  return {
+    success,
+    toolCallCount,
+    toolNames,
+    finishReason,
+    issues,
+    summary: finalText.slice(0, 300),
+    errorMessage: subAgentError?.message,
+  };
+};
+
+const buildInnerSystemPrompt = (
+  task: string,
+  requestedToolkits: string[],
+  connectorsStatus?: ConnectorStatusLists
+): string => {
+  const enabledList = connectorsStatus?.enabled ?? [];
+  const disabledList = connectorsStatus?.disabled ?? [];
+  const notConnectedList = connectorsStatus?.notConnected ?? [];
+
+  // Get tool-specific prompts based on requested toolkits
+  const toolSpecificPrompts = getToolSpecificPrompts(requestedToolkits);
+
+  let systemPrompt = `You are a focused operations agent. Your job is to complete the task provided by the supervisor using ONLY the enabled tools.\n\nTask: ${task}\nEnabled toolkits available to you: ${requestedToolkits.join(", ")}\nOther toolkits for context:\n- Enabled (outside request): ${
+    enabledList
+      .filter((slug) => !requestedToolkits.includes(slug))
+      .join(", ") || "none"
+  }\n- Disabled: ${disabledList.join(", ") || "none"}\n- Not connected: ${notConnectedList.join(", ") || "none"}`;
+
+  // Add tool-specific guidance if available
+  if (toolSpecificPrompts) {
+    systemPrompt += `\n\n${toolSpecificPrompts}`;
+  }
+
+  systemPrompt +=
+    "\n\nWork autonomously using the supplied tools. Prefer minimal reasoning tokens and return a concise summary once finished.";
+
+  return systemPrompt;
+};
+
+export const createAgentTool = ({
+  userId,
+  availableToolkits,
+  model,
+  systemPrompt,
+  maxSteps = 8,
+  providerOptions,
+  connectorsStatus,
+  writer,
+}: CreateAgentToolOptions): Tool<CreateAgentInput, string> => {
+  const connectorListDescription =
+    availableToolkits.length > 0
+      ? availableToolkits.join(", ")
+      : "(no connectors available)";
+
+  return tool<CreateAgentInput, string>({
+    description: `Create a temporary agent that can use specific connectors to complete a task. Provide the connectors via the \`tool\` field, the high-level goal via \`task\`, and optional context from previous operations via \`context\`. Available connectors: ${connectorListDescription}.`,
+    inputSchema: createAgentInputSchema,
+    toModelOutput: (result: string) => {
+      try {
+        const analysis: SubAgentAnalysis = JSON.parse(result);
+
+        if (!analysis.success) {
+          const issueDetails = analysis.issues.join("; ");
+          return {
+            type: "text",
+            value: `Sub-agent failed to complete task. Issues: ${issueDetails}. Tools called: ${analysis.toolCallCount} (${analysis.toolNames.join(", ") || "none"}). Finish reason: ${analysis.finishReason}. Consider different approach or retry.`,
+          };
+        }
+
+        return {
+          type: "text",
+          value: `Sub-agent completed task successfully. Used tools: ${analysis.toolNames.join(", ") || "none"} (${analysis.toolCallCount} calls). Result: ${analysis.summary.slice(0, 150)}${analysis.summary.length > 150 ? "..." : ""}`,
+        };
+      } catch (_error) {
+        // Fallback for any parsing errors - should not happen with new implementation
+        return {
+          type: "text",
+          value: `Sub-agent execution completed but analysis failed. Raw result: ${result.slice(0, 200)}${result.length > 200 ? "..." : ""}`,
+        };
+      }
+    },
+    async execute(input) {
+      const toolValues = Array.isArray(input.tool) ? input.tool : [input.tool];
+
+      const requestedToolkits = Array.from(
+        new Set(
+          toolValues
+            .map((rawValue) => rawValue.trim())
+            .filter((value) => value.length > 0)
+            .map((value) => value.toUpperCase())
+        )
+      );
+
+      if (requestedToolkits.length === 0) {
+        throw new Error("At least one connector toolkit must be specified.");
+      }
+
+      if (!userId) {
+        throw new Error("User session required to use connectors.");
+      }
+
+      const availableSet = new Set(
+        availableToolkits.map((slug) => slug.toUpperCase())
+      );
+      const unavailable = requestedToolkits.filter(
+        (slug) => !availableSet.has(slug)
+      );
+
+      if (unavailable.length > 0) {
+        throw new Error(
+          `Unavailable connectors requested: ${unavailable.join(", ")}. Enable them in settings and try again.`
+        );
+      }
+
+      const rawTools = await getComposioTools(userId, requestedToolkits);
+      const filteredTools: Record<string, Tool> = {};
+      for (const [toolName, candidate] of Object.entries(rawTools)) {
+        if (
+          candidate &&
+          typeof candidate === "object" &&
+          "execute" in candidate &&
+          typeof (candidate as Tool).execute === "function"
+        ) {
+          filteredTools[toolName] = candidate as Tool;
+        }
+      }
+
+      if (Object.keys(filteredTools).length === 0) {
+        throw new Error(
+          "No connector tools available for the requested selection."
+        );
+      }
+
+      const innerSystem =
+        systemPrompt ??
+        buildInnerSystemPrompt(input.task, requestedToolkits, connectorsStatus);
+
+      // Build messages array based on whether context is provided
+      const messages: UIMessage[] = [];
+
+      // Add context message if provided
+      if (input.context) {
+        messages.push({
+          id: "create-agent-context",
+          role: "user",
+          parts: [
+            {
+              type: "text",
+              text: `Context from previous operations:\n\n${input.context}`,
+            },
+          ],
+        });
+      }
+
+      // Add task message
+      messages.push({
+        id: "create-agent-task",
+        role: "user",
+        parts: [{ type: "text", text: input.task }],
+      });
+
+      // Track sub-agent token usage and error state
+      let agentTokenUsage = {
+        inputTokens: 0,
+        outputTokens: 0,
+        totalTokens: 0,
+      };
+      let subAgentError: Error | null = null;
+
+      // Stream the agent's work using standard AI SDK streaming
+      const result = streamText({
+        model,
+        system: innerSystem,
+        messages: convertToModelMessages(messages),
+        tools: filteredTools,
+        stopWhen: stepCountIs(maxSteps),
+        providerOptions,
+        // toolChoice: "required",
+        onError: ({ error }) => {
+          subAgentError =
+            error instanceof Error ? error : new Error(String(error));
+        },
+        onFinish({ usage }) {
+          agentTokenUsage = {
+            inputTokens: usage.inputTokens || 0,
+            outputTokens: usage.outputTokens || 0,
+            totalTokens: usage.totalTokens || 0,
+          };
+        },
+      });
+
+      // Generate unique boundary ID for this agent execution
+      const boundaryId = `agent-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+
+      // Inject start boundary marker
+      writer.write({
+        type: "data-agent-boundary",
+        id: `${boundaryId}-start`,
+        data: {
+          type: "start",
+          agentId: "create_agent",
+          boundaryId,
+          timestamp: new Date().toISOString(),
+          task: input.task,
+          toolkits: requestedToolkits,
+          context: input.context,
+        },
+        transient: false, // Keep in message history for boundary detection
+      });
+
+      // Let AI SDK handle all the streaming naturally
+      writer.merge(result.toUIMessageStream());
+
+      // Collect text output from the stream and get tool execution information
+      let finalText = "";
+      for await (const textPart of result.textStream) {
+        finalText += textPart;
+      }
+
+      // Get tool execution information (these are Promises)
+      const [steps, finishReason] = await Promise.all([
+        result.steps,
+        result.finishReason,
+      ]);
+
+      // Collect all tool calls from all steps (not just the last one)
+      const toolCalls = steps.flatMap((step) => step.toolCalls || []);
+
+      // Analyze what the sub-agent actually did
+      const analysis = analyzeSubAgentExecution({
+        toolCalls,
+        finishReason,
+        finalText: finalText.trim(),
+        subAgentError,
+      });
+
+      // Inject end boundary marker with analysis
+      writer.write({
+        type: "data-agent-boundary",
+        id: `${boundaryId}-end`,
+        data: {
+          type: "end",
+          agentId: "create_agent",
+          boundaryId,
+          timestamp: new Date().toISOString(),
+          analysis,
+          toolSummary: {
+            toolsUsed: analysis.toolNames,
+            toolCallCount: analysis.toolCallCount,
+            finishReason: analysis.finishReason,
+            success: analysis.success,
+          },
+          tokenUsage: agentTokenUsage,
+        },
+        transient: false, // Keep in message history for boundary detection
+      });
+
+      // Return structured analysis as JSON for toModelOutput processing
+      return JSON.stringify(analysis);
+    },
+  });
+};

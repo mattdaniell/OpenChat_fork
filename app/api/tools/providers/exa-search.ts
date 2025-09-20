@@ -1,4 +1,5 @@
 import Exa from "exa-js";
+import { handleSearchError } from "../search-errors";
 import {
   PROVIDER_LIMITS,
   SEARCH_CONFIG,
@@ -111,9 +112,7 @@ export class ExaSearchProvider implements SearchAdapter {
       return this.formatResults(result.results || [], scrapeContent);
     } catch (error) {
       // console.error('[EXA] ❌ Search failed:', error);
-      throw new Error(
-        `Failed to search with Exa: ${error instanceof Error ? error.message : "Unknown error"}`
-      );
+      handleSearchError(error, "exa");
     }
   }
 

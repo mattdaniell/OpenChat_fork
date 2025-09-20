@@ -7,12 +7,15 @@ import { convexAuthNextjsToken } from "@convex-dev/auth/nextjs/server";
 import {
   consumeStream,
   convertToModelMessages,
+  createUIMessageStream,
+  createUIMessageStreamResponse,
   type FileUIPart,
   experimental_generateImage as generateImage,
   type JSONValue,
   smoothStream,
   stepCountIs,
   streamText,
+  type Tool,
   type UIMessage,
 } from "ai";
 import { fetchMutation, fetchQuery } from "convex/nextjs";
@@ -21,9 +24,9 @@ import { searchTool } from "@/app/api/tools/search";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import type { Message } from "@/convex/schema/message";
-import { getComposioTools } from "@/lib/composio-server";
 import { MODELS_MAP } from "@/lib/config";
 import { calculateConnectorStatus } from "@/lib/connector-utils";
+import { createAgentTool } from "@/lib/create-agent-tool";
 import { limitDepth } from "@/lib/depth-limiter";
 import { ERROR_CODES } from "@/lib/error-codes";
 import {
@@ -34,6 +37,10 @@ import {
   shouldShowInConversation,
 } from "@/lib/error-utils";
 import { buildSystemPrompt, PERSONAS_MAP } from "@/lib/prompt_config";
+import {
+  detectProviderErrorFromObject,
+  detectProviderErrorInText,
+} from "@/lib/provider-error-detector";
 import { sanitizeUserInput } from "@/lib/sanitize";
 import { uploadBlobToR2 } from "@/lib/server-upload-helpers";
 
@@ -530,26 +537,6 @@ export async function POST(req: Request) {
     // Calculate connector status from database (server is authoritative)
     const connectorsStatus = calculateConnectorStatus(userConnectors);
 
-    // Get Composio tools based on enabled connectors
-    let composioTools = {};
-    if (
-      supportsToolCalling(selectedModel) &&
-      user &&
-      connectorsStatus.enabled.length > 0
-    ) {
-      try {
-        composioTools = await getComposioTools(
-          user._id,
-          connectorsStatus.enabled
-        );
-      } catch {
-        // If Composio tools fail to load, continue without them
-        composioTools = {};
-      }
-    }
-
-    // const userId = user?._id;
-
     // --- API Key and Model Configuration ---
     const { apiKeyUsage } = selectedModel;
     let userApiKey: string | null = null;
@@ -686,8 +673,7 @@ export async function POST(req: Request) {
 
     const basePrompt = personaId ? PERSONAS_MAP[personaId]?.prompt : undefined;
     const enableTools =
-      supportsToolCalling(selectedModel) &&
-      Object.keys(composioTools).length > 0;
+      supportsToolCalling(selectedModel) && connectorsStatus.enabled.length > 0;
     const finalSystemPrompt = buildSystemPrompt(
       user,
       basePrompt,
@@ -839,184 +825,324 @@ export async function POST(req: Request) {
       cachedInputTokens: 0,
     };
 
-    // Create reusable streamText function with shared logic
-    const createStreamTextCall = (useUser: boolean) => {
-      return streamText({
-        model: selectedModel.api_sdk,
-        system: finalSystemPrompt,
-        messages: convertToModelMessages(messages),
-        tools: {
-          ...(enableSearch ? { search: searchTool } : {}),
-          ...(supportsToolCalling(selectedModel) ? composioTools : {}),
-        },
-        stopWhen: stepCountIs(20),
-        experimental_transform: smoothStream({
-          delayInMs: 20, // optional: defaults to 10ms
-          chunking: "word", // optional: defaults to 'word'
-        }),
-        // COMMENTED OUT: abortSignal: req.signal
-        //
-        // Why we don't forward client abort signals to AI provider:
-        // 1. Page reloads/navigation send abort signals that we don't want to forward to AI
-        // 2. We use result.consumeStream() below to ensure completion even on client disconnect
-        // 3. Client disconnects (page reload, tab close) should NOT stop AI generation on server
-        // 4. Server should complete the generation and save full response to database
-        // 5. Only intentional user "stop" actions should abort AI generation (handled separately)
-        //
-        // Current behavior with this commented out:
-        // - Page reload during streaming: AI continues on server, full response saved
-        // - User clicks stop: Client stops receiving updates, server completes in background
-        // - Browser/tab close: AI continues on server, full response saved
-        //
-        // This follows AI SDK v5 best practices for handling client disconnects
-        // abortSignal: req.signal,
-        providerOptions: makeOptions(useUser) as
-          | Record<string, Record<string, JSONValue>>
-          | undefined,
-        onError: async (error) => {
-          // Save conversation errors as messages
-          if (shouldShowInConversation(error) && token) {
-            try {
-              await saveErrorMessage(
-                chatId,
-                userMsgId,
-                error,
-                token,
-                selectedModel.id,
-                selectedModel.name,
-                enableSearch,
-                reasoningEffort
-              );
-            } catch (_saveError) {
-              // console.error('Failed to save error message:', saveError);
-            }
+    let result: ReturnType<typeof streamText> | null = null;
+    let wasUserKeyUsed = false;
+    let errorMessageSaved = false;
 
-            // Create standardized streaming error for client
-            const streamingError = createStreamingError(error);
-            throw new Error(JSON.stringify(streamingError.errorPayload));
-          }
-        },
-        onFinish({ usage }) {
-          // This only runs on successful completion.
-          // Just capture the usage data here.
-          finalUsage = {
-            inputTokens: usage.inputTokens || 0,
-            outputTokens: usage.outputTokens || 0,
-            reasoningTokens: usage.reasoningTokens || 0,
-            totalTokens: usage.totalTokens || 0,
-            cachedInputTokens: usage.cachedInputTokens || 0,
-          };
-        },
-      });
-    };
-
-    // Try to get the result using the appropriate API key configuration
-    let result: ReturnType<typeof createStreamTextCall>;
-    let wasUserKeyUsed: boolean;
-
-    if (apiKeyUsage?.allowUserKey) {
-      const primaryIsUserKey = useUserKey;
-      try {
-        wasUserKeyUsed = primaryIsUserKey;
-        result = createStreamTextCall(primaryIsUserKey);
-      } catch (primaryError) {
-        // Save conversation errors as messages
-        if (shouldShowInConversation(primaryError) && token) {
-          await saveErrorMessage(
-            chatId,
-            userMsgId,
-            primaryError,
-            token,
-            selectedModel.id,
-            selectedModel.name,
-            enableSearch,
-            reasoningEffort
-          );
-        }
-
-        const fallbackIsPossible =
-          primaryIsUserKey || (!primaryIsUserKey && Boolean(userApiKey));
-
-        if (fallbackIsPossible) {
-          const fallbackIsUserKey = !primaryIsUserKey;
-          try {
-            wasUserKeyUsed = fallbackIsUserKey;
-            result = createStreamTextCall(fallbackIsUserKey);
-          } catch (fallbackError) {
-            // Save conversation errors as messages for fallback error too
-            if (shouldShowInConversation(fallbackError) && token) {
-              await saveErrorMessage(
-                chatId,
-                userMsgId,
-                fallbackError,
-                token,
-                selectedModel.id,
-                selectedModel.name,
-                enableSearch,
-                reasoningEffort
-              );
-            }
-            throw fallbackError;
-          }
-        } else {
-          throw primaryError;
-        }
-      }
-    } else {
-      wasUserKeyUsed = false;
-      try {
-        result = createStreamTextCall(false);
-      } catch (streamError) {
-        // Save conversation errors as messages
-        if (shouldShowInConversation(streamError) && token) {
-          await saveErrorMessage(
-            chatId,
-            userMsgId,
-            streamError,
-            token,
-            selectedModel.id,
-            selectedModel.name,
-            enableSearch,
-            reasoningEffort
-          );
-        }
-        throw streamError;
-      }
-    }
-
-    // consume the stream to ensure it runs to completion & triggers onFinish
-    // even when the client response is aborted:
-    result.consumeStream(); // no await
-
-    // Return the new toUIMessageStreamResponse with simplified message persistence
-    return result.toUIMessageStreamResponse({
+    const stream = createUIMessageStream({
       originalMessages: messages,
-      sendReasoning: true,
-      sendSources: true,
-      onFinish: async (Messages) => {
-        // This callback ALWAYS runs, even on abort.
-        // Construct the final metadata here.
+      async execute({ writer }) {
+        const runStream = (useUserKeyOverride: boolean) => {
+          const providerOptions = makeOptions(useUserKeyOverride) as
+            | Record<string, Record<string, JSONValue>>
+            | undefined;
+
+          const toolset: Record<string, Tool> = {};
+
+          if (enableSearch) {
+            toolset.search = searchTool;
+          }
+
+          if (
+            supportsToolCalling(selectedModel) &&
+            user &&
+            connectorsStatus.enabled.length > 0
+          ) {
+            toolset.create_agent = createAgentTool({
+              userId: user._id,
+              availableToolkits: connectorsStatus.enabled,
+              model: selectedModel.api_sdk,
+              providerOptions,
+              connectorsStatus,
+              writer,
+            });
+          }
+
+          const streamResult = streamText({
+            model: selectedModel.api_sdk,
+            system: finalSystemPrompt,
+            messages: convertToModelMessages(messages),
+            tools: toolset,
+            stopWhen: stepCountIs(20),
+            experimental_transform: smoothStream({
+              delayInMs: 20,
+              chunking: "word",
+            }),
+            providerOptions,
+            onError: async ({ error }) => {
+              // Handle errors gracefully - save to conversation but don't throw
+              // The throwing behavior will be handled in the fullStream processing
+
+              // First, try to detect provider-specific error patterns
+              const detectedError = detectProviderErrorFromObject(
+                error,
+                selectedModel.provider
+              );
+
+              if (detectedError) {
+                // If we detected a provider-specific error, save it with enhanced message
+                if (token) {
+                  try {
+                    await saveErrorMessage(
+                      chatId,
+                      userMsgId,
+                      detectedError, // Pass DetectedError directly, don't wrap in Error
+                      token,
+                      selectedModel.id,
+                      selectedModel.name,
+                      enableSearch,
+                      reasoningEffort
+                    );
+                    errorMessageSaved = true; // Mark that error message was saved
+                  } catch (_saveError) {
+                    // swallow
+                  }
+                }
+                return; // Exit early - error saved, no throwing
+              }
+
+              // Fallback to original error handling
+              if (shouldShowInConversation(error) && token) {
+                try {
+                  await saveErrorMessage(
+                    chatId,
+                    userMsgId,
+                    error,
+                    token,
+                    selectedModel.id,
+                    selectedModel.name,
+                    enableSearch,
+                    reasoningEffort
+                  );
+                  errorMessageSaved = true; // Mark that error message was saved
+                } catch (_saveError) {
+                  // swallow
+                }
+              }
+              // No throwing - let the stream handle the error state gracefully
+            },
+            onFinish({ totalUsage }) {
+              finalUsage = {
+                inputTokens: totalUsage.inputTokens || 0,
+                outputTokens: totalUsage.outputTokens || 0,
+                reasoningTokens: totalUsage.reasoningTokens || 0,
+                totalTokens: totalUsage.totalTokens || 0,
+                cachedInputTokens: totalUsage.cachedInputTokens || 0,
+              };
+            },
+          });
+
+          // Enhanced stream processing with error detection
+          (async () => {
+            let accumulatedText = "";
+
+            for await (const part of streamResult.fullStream) {
+              switch (part.type) {
+                case "error": {
+                  // Error parts from AI SDK - these are already handled by onError callback
+                  // No need to save again, stream processing continues normally
+                  break;
+                }
+                case "text-delta": {
+                  // Accumulate text and check for error patterns
+                  accumulatedText += part.text;
+
+                  // Check accumulated text for provider error patterns
+                  const detectedError = detectProviderErrorInText(
+                    accumulatedText,
+                    selectedModel.provider
+                  );
+                  if (detectedError) {
+                    // Found an error pattern in the streaming text
+                    // Save the error with the provider-specific message
+                    if (token) {
+                      try {
+                        await saveErrorMessage(
+                          chatId,
+                          userMsgId,
+                          detectedError, // Pass the DetectedError object directly
+                          token,
+                          selectedModel.id,
+                          selectedModel.name,
+                          enableSearch,
+                          reasoningEffort
+                        );
+                        errorMessageSaved = true; // Mark that error message was saved
+                      } catch (_saveError) {
+                        // swallow
+                      }
+                    }
+
+                    // Clear accumulated text to avoid re-detecting the same error
+                    accumulatedText = "";
+
+                    // Stop processing this stream since we found an error
+                    break;
+                  }
+
+                  // Limit accumulated text size to prevent memory issues
+                  if (accumulatedText.length > 2000) {
+                    accumulatedText = accumulatedText.slice(-1000);
+                  }
+                  break;
+                }
+                default:
+                  // For other part types, process normally
+                  break;
+              }
+            }
+          })();
+
+          // Merge the regular UI stream for normal processing
+          writer.merge(
+            streamResult.toUIMessageStream({
+              sendReasoning: true,
+              sendSources: true,
+            })
+          );
+
+          return streamResult;
+        };
+
+        const tryRun = async () => {
+          if (apiKeyUsage?.allowUserKey) {
+            const primaryIsUserKey = useUserKey;
+            try {
+              wasUserKeyUsed = primaryIsUserKey;
+              result = runStream(primaryIsUserKey);
+              return;
+            } catch (primaryError) {
+              if (shouldShowInConversation(primaryError) && token) {
+                await saveErrorMessage(
+                  chatId,
+                  userMsgId,
+                  primaryError,
+                  token,
+                  selectedModel.id,
+                  selectedModel.name,
+                  enableSearch,
+                  reasoningEffort
+                );
+              }
+
+              const fallbackIsPossible =
+                primaryIsUserKey || (!primaryIsUserKey && Boolean(userApiKey));
+
+              if (!fallbackIsPossible) {
+                throw primaryError;
+              }
+
+              const fallbackIsUserKey = !primaryIsUserKey;
+              try {
+                wasUserKeyUsed = fallbackIsUserKey;
+                result = runStream(fallbackIsUserKey);
+                return;
+              } catch (fallbackError) {
+                if (shouldShowInConversation(fallbackError) && token) {
+                  await saveErrorMessage(
+                    chatId,
+                    userMsgId,
+                    fallbackError,
+                    token,
+                    selectedModel.id,
+                    selectedModel.name,
+                    enableSearch,
+                    reasoningEffort
+                  );
+                }
+                throw fallbackError;
+              }
+            }
+          }
+
+          wasUserKeyUsed = false;
+          try {
+            result = runStream(false);
+          } catch (streamError) {
+            if (shouldShowInConversation(streamError) && token) {
+              await saveErrorMessage(
+                chatId,
+                userMsgId,
+                streamError,
+                token,
+                selectedModel.id,
+                selectedModel.name,
+                enableSearch,
+                reasoningEffort
+              );
+            }
+            throw streamError;
+          }
+        };
+
+        await tryRun();
+      },
+      async onFinish({ responseMessage }) {
+        if (!result || errorMessageSaved) {
+          return; // Don't save if no result or error message was already saved
+        }
+
+        const sanitizedParts = (responseMessage.parts ?? []).filter((part) => {
+          if (!part || typeof part !== "object") {
+            return true;
+          }
+
+          return (part as { transient?: unknown }).transient !== true;
+        });
+
+        // Extract agent token usage from boundary markers and add to main usage
+        const additionalAgentTokens = {
+          inputTokens: 0,
+          outputTokens: 0,
+          totalTokens: 0,
+        };
+
+        const agentBoundaryParts = sanitizedParts.filter(
+          (part) => part.type === "data-agent-boundary"
+        );
+
+        for (const boundaryPart of agentBoundaryParts) {
+          // Type assertion for boundary parts with data property
+          const boundaryData = (
+            boundaryPart as {
+              data?: {
+                type?: string;
+                tokenUsage?: {
+                  inputTokens?: number;
+                  outputTokens?: number;
+                  totalTokens?: number;
+                };
+              };
+            }
+          ).data;
+          if (boundaryData?.type === "end" && boundaryData?.tokenUsage) {
+            const usage = boundaryData.tokenUsage;
+            additionalAgentTokens.inputTokens += usage.inputTokens || 0;
+            additionalAgentTokens.outputTokens += usage.outputTokens || 0;
+            additionalAgentTokens.totalTokens += usage.totalTokens || 0;
+          }
+        }
+
         const finalMetadata: Infer<typeof Message>["metadata"] = {
           ...baseMetadata,
           serverDurationMs: Date.now() - startTime,
-          inputTokens: finalUsage.inputTokens,
-          outputTokens: finalUsage.outputTokens,
-          totalTokens: finalUsage.totalTokens,
+          // Add agent tokens to main token counts for unified tracking
+          inputTokens:
+            finalUsage.inputTokens + additionalAgentTokens.inputTokens,
+          outputTokens:
+            finalUsage.outputTokens + additionalAgentTokens.outputTokens,
+          totalTokens:
+            finalUsage.totalTokens + additionalAgentTokens.totalTokens,
           reasoningTokens: finalUsage.reasoningTokens,
           cachedInputTokens: finalUsage.cachedInputTokens,
         };
 
-        // Save the final assistant message with all parts
-        const capturedText = Messages.responseMessage.parts
+        const capturedText = sanitizedParts
           .filter((part) => part.type === "text")
           .map((part) => part.text)
           .join("");
 
-        // Limit depth of parts to prevent Convex nesting limit errors
-        const depthLimitedParts = limitDepth(
-          Messages.responseMessage.parts,
-          14
-        );
+        const depthLimitedParts = limitDepth(sanitizedParts, 14);
 
         await fetchMutation(
           api.messages.saveAssistantMessage,
@@ -1030,6 +1156,7 @@ export async function POST(req: Request) {
           },
           { token }
         );
+
         if (wasUserKeyUsed) {
           await fetchMutation(
             api.api_keys.incrementUserApiKeyUsage,
@@ -1037,8 +1164,6 @@ export async function POST(req: Request) {
             { token }
           );
         } else if (!selectedModel.skipRateLimit) {
-          // Only increment credits if model doesn't skip rate limiting
-          // Check if the selected model uses premium credits
           const usesPremiumCredits = selectedModel.usesPremiumCredits === true;
 
           await fetchMutation(
@@ -1048,6 +1173,26 @@ export async function POST(req: Request) {
           );
         }
       },
+      onError: (error) => {
+        // First, try to detect provider-specific error patterns
+        const detectedError = detectProviderErrorFromObject(
+          error,
+          selectedModel.provider
+        );
+
+        if (detectedError) {
+          // Return the provider-specific user-friendly message
+          return detectedError.userFriendlyMessage;
+        }
+
+        // Fallback to original error handling
+        const { errorPayload } = createStreamingError(error);
+        return errorPayload.error.message;
+      },
+    });
+
+    return createUIMessageStreamResponse({
+      stream,
       consumeSseStream: consumeStream,
     });
   } catch (err) {

@@ -116,6 +116,8 @@ const FILE_UPLOAD_MODELS = [
   // Grok models
   "grok-3",
   "grok-3-mini",
+  "x-ai/grok-4-fast-thinking",
+  "x-ai/grok-4-fast",
 ] as const;
 
 type AllowedMimeType = (typeof UPLOAD_ALLOWED_MIME)[number];

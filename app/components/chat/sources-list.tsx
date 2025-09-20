@@ -99,14 +99,16 @@ export const SourcesList = memo<SourcesListProps>(
               </span>
               <div className="-space-x-1 flex">
                 {previewFavicons.map((source) => (
-                  <Image
+                  /* biome-ignore lint/performance/noImgElement: Favicons should use native img for better caching */
+                  <img
                     alt={`Favicon for ${source.title}`}
                     className="h-4 w-4 rounded-full border-2 border-background"
+                    decoding="async"
                     height={16}
                     key={source.sourceId}
-                    loader={({ src }) => src}
+                    loading="lazy"
+                    referrerPolicy="no-referrer"
                     src={source.faviconUrl}
-                    unoptimized
                     width={16}
                   />
                 ))}
@@ -169,20 +171,22 @@ export const SourcesList = memo<SourcesListProps>(
                                       handleImageError(source.sourceId)
                                     }
                                     placeholder="blur"
+                                    priority={false}
                                     src={source.openGraphUrl}
-                                    // Remove unoptimized to enable Next.js optimization
                                   />
                                 )}
                                 {/* Favicon overlay */}
                                 <div className="absolute bottom-2 left-2">
                                   <div className="rounded-full bg-background/90 p-1 backdrop-blur-sm">
-                                    <Image
+                                    {/* biome-ignore lint/performance/noImgElement: Favicons should use native img for better caching */}
+                                    <img
                                       alt={`Favicon for ${source.title}`}
                                       className="h-4 w-4 rounded-sm"
+                                      decoding="async"
                                       height={16}
-                                      loader={({ src }) => src}
+                                      loading="lazy"
+                                      referrerPolicy="no-referrer"
                                       src={source.faviconUrl}
-                                      unoptimized
                                       width={16}
                                     />
                                   </div>

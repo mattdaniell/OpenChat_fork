@@ -1,6 +1,6 @@
 import type { UIMessage as MessageType } from "@ai-sdk/react";
 import type { Infer } from "convex/values";
-import React, { useState } from "react";
+import React, { useCallback, useState } from "react";
 import type { Message as MessageSchema } from "@/convex/schema/message";
 import { MessageAssistant } from "./message-assistant";
 import { MessageUser } from "./message-user";
@@ -56,7 +56,7 @@ function MessageComponent({
 }: MessageProps) {
   const [copied, setCopied] = useState(false);
 
-  const copyToClipboard = () => {
+  const copyToClipboard = useCallback(() => {
     // Extract text content from parts for copying
     const textContent =
       parts
@@ -66,7 +66,7 @@ function MessageComponent({
     navigator.clipboard.writeText(textContent);
     setCopied(true);
     setTimeout(() => setCopied(false), 500);
-  };
+  }, [parts]);
 
   if (variant === "user") {
     return (
@@ -112,5 +112,24 @@ function MessageComponent({
   return null;
 }
 
-export const Message = React.memo(MessageComponent);
+// Custom comparator to ignore handler prop changes
+const equalMessage = (a: MessageProps, b: MessageProps) =>
+  a.id === b.id &&
+  a.variant === b.variant &&
+  a.isLast === b.isLast &&
+  a.hasScrollAnchor === b.hasScrollAnchor &&
+  a.model === b.model &&
+  a.readOnly === b.readOnly &&
+  a.status === b.status &&
+  a.metadata === b.metadata &&
+  a.selectedModel === b.selectedModel &&
+  a.isUserAuthenticated === b.isUserAuthenticated &&
+  a.isReasoningModel === b.isReasoningModel &&
+  a.reasoningEffort === b.reasoningEffort &&
+  a.parts === b.parts &&
+  a.onDelete === b.onDelete &&
+  a.onEdit === b.onEdit;
+// Intentionally ignore: onReload, onBranch (their identities change but logic doesn't)
+
+export const Message = React.memo(MessageComponent, equalMessage);
 Message.displayName = "Message";
