@@ -83,6 +83,7 @@ const Conversation = React.memo(
               index === messages.length - 1 && status !== "submitted";
             const hasScrollAnchor =
               isLast && messages.length > initialMessageCount.current;
+            const messageStatus = isLast ? status : "ready";
 
             return (
               <Message
@@ -101,7 +102,7 @@ const Conversation = React.memo(
                 parts={message.parts}
                 reasoningEffort={reasoningEffort}
                 selectedModel={selectedModel}
-                status={status}
+                status={messageStatus}
                 variant={message.role}
               />
             );

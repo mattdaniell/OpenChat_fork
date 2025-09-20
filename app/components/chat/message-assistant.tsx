@@ -250,7 +250,7 @@ const findCreateAgentBoundaries = (
         fallbackBoundaries.push({
           boundaryId: `fallback-${index}`,
           startIndex: index,
-          endIndex: Math.min(index + 5, parts.length - 1),
+          endIndex: parts.length - 1,
           task: fallbackTask ?? "",
           toolkits,
         });
@@ -598,6 +598,79 @@ const renderReasoningPart = (
 
 type ExtendedToolUIPart = ToolUIPart & { toolName?: string };
 
+// Add memoized ConnectorToolCall wrapper
+const ConnectorToolCallMemo = React.memo(ConnectorToolCall);
+
+function ToolRenderer({
+  part,
+  toolType,
+  connectorDisplayName,
+  connectorType,
+}: {
+  part: ToolUIPart;
+  toolType: string;
+  connectorDisplayName: string;
+  connectorType: ConnectorType;
+}) {
+  const isLoading = useMemo(
+    () =>
+      "state" in part &&
+      (part.state === "input-streaming" || part.state === "input-available"),
+    [part]
+  );
+  const hasCompleted = useMemo(
+    () => "state" in part && part.state === "output-available",
+    [part]
+  );
+  const hasError = useMemo(
+    () => "state" in part && part.state === "output-error",
+    [part]
+  );
+
+  const data = React.useMemo(() => {
+    const d: {
+      toolName: string;
+      connectorType: ConnectorType;
+      request?: {
+        action: string;
+        parameters: Record<string, unknown>;
+      };
+      response?: {
+        success: boolean;
+        data?: unknown;
+        error?: string;
+      };
+    } = { toolName: connectorDisplayName, connectorType };
+
+    const extendedPart = part as ExtendedToolUIPart;
+    if ("input" in part && part.input) {
+      d.request = {
+        action: extendedPart.toolName ?? toolType,
+        parameters: part.input as Record<string, unknown>,
+      };
+    }
+    if (hasCompleted && "output" in part && part.output) {
+      d.response = { success: true, data: part.output };
+    } else if (hasError && "error" in part && part.error) {
+      d.response = {
+        success: false,
+        error:
+          typeof part.error === "string" ? part.error : "Tool execution failed",
+      };
+    }
+    return d;
+  }, [
+    connectorDisplayName,
+    connectorType,
+    toolType,
+    hasCompleted,
+    hasError,
+    part,
+  ]);
+
+  return <ConnectorToolCallMemo data={data} isLoading={isLoading} />;
+}
+
 const renderToolPart = (part: ToolUIPart, index: number, _id: string) => {
   const extendedPart = part as ExtendedToolUIPart;
   const toolType = part.type.replace("tool-", "");
@@ -649,8 +722,6 @@ const renderToolPart = (part: ToolUIPart, index: number, _id: string) => {
 
     // Handle different tool states based on AI SDK v5 ToolUIPart states
     if ("state" in part) {
-      const isLoading =
-        part.state === "input-streaming" || part.state === "input-available";
       const hasCompleted = part.state === "output-available";
       const hasError = part.state === "output-error";
 
@@ -700,12 +771,14 @@ const renderToolPart = (part: ToolUIPart, index: number, _id: string) => {
         };
       }
 
-      // Add metadata
-      toolCallData.metadata = {
-        timestamp: new Date().toISOString(),
-      };
-
-      return <ConnectorToolCall data={toolCallData} isLoading={isLoading} />;
+      return (
+        <ToolRenderer
+          connectorDisplayName={connectorDisplayName}
+          connectorType={connectorType}
+          part={part}
+          toolType={toolType}
+        />
+      );
     }
 
     // Fallback for connector tools without proper state (shouldn't happen with AI SDK v5)
@@ -721,19 +794,12 @@ const renderToolPart = (part: ToolUIPart, index: number, _id: string) => {
         data?: unknown;
         error?: string;
       };
-      metadata?: {
-        executionTime?: number;
-        timestamp?: string;
-      };
     } = {
       toolName: connectorDisplayName,
       connectorType,
-      metadata: {
-        timestamp: new Date().toISOString(),
-      },
     };
 
-    return <ConnectorToolCall data={fallbackData} isLoading={false} />;
+    return <ConnectorToolCallMemo data={fallbackData} isLoading={false} />;
   }
 
   return null;
@@ -1001,6 +1067,26 @@ function MessageAssistantInner({
     [segments]
   );
 
+  // State for agent open/closed state
+  const [agentOpenStates, setAgentOpenStates] = useState<
+    Record<string, boolean>
+  >({});
+
+  // Stabilize onOpenChange handlers per CoT segment
+  const onOpenChangeByKey = useMemo(() => {
+    const map: Record<string, (open: boolean) => void> = {};
+    for (const seg of agentSegments) {
+      const key = seg.key;
+      map[key] = (open: boolean) => {
+        agentManualOverrides.current[key] = true;
+        setAgentOpenStates((prev) =>
+          prev[key] === open ? prev : { ...prev, [key]: open }
+        );
+      };
+    }
+    return map;
+  }, [agentSegments]);
+
   // State for reasoning collapse/expand functionality - track each reasoning part individually
   const [reasoningStates, setReasoningStates] = useState<
     Record<string, boolean>
@@ -1012,9 +1098,6 @@ function MessageAssistantInner({
   const initialStatusRef = useRef<Record<string, boolean>>({});
   const [isTouch, setIsTouch] = useState(false);
 
-  const [agentOpenStates, setAgentOpenStates] = useState<
-    Record<string, boolean>
-  >({});
   const agentManualOverrides = useRef<Record<string, boolean>>({});
   useEffect(() => {
     setAgentOpenStates((previousState) => {
@@ -1224,18 +1307,7 @@ function MessageAssistantInner({
           return [
             <ChainOfThought
               key={segment.key}
-              onOpenChange={(open) => {
-                agentManualOverrides.current[segment.key] = true;
-                setAgentOpenStates((previousState) => {
-                  if (previousState[segment.key] === open) {
-                    return previousState;
-                  }
-                  return {
-                    ...previousState,
-                    [segment.key]: open,
-                  };
-                });
-              }}
+              onOpenChange={onOpenChangeByKey[segment.key]}
               open={isOpen}
               tools={segment.boundary.toolkits}
             >
@@ -1354,7 +1426,21 @@ function MessageAssistantInner({
   );
 }
 
-// Default shallow comparison is fine – re-render will happen whenever
-// `parts`, `attachments`, `status`, or any primitive prop reference changes
-// which is what we want during streaming.
-export const MessageAssistant = memo(MessageAssistantInner);
+// Custom comparator to ignore handler prop changes
+const areEqual = (prev: MessageAssistantProps, next: MessageAssistantProps) => {
+  return (
+    prev.id === next.id &&
+    prev.status === next.status &&
+    prev.isLast === next.isLast &&
+    prev.hasScrollAnchor === next.hasScrollAnchor &&
+    prev.model === next.model &&
+    prev.readOnly === next.readOnly &&
+    prev.copied === next.copied &&
+    prev.metadata === next.metadata &&
+    prev.parts === next.parts && // keep ref equality
+    prev.copyToClipboard === next.copyToClipboard
+    // Intentionally ignore: onReload, onBranch
+  );
+};
+
+export const MessageAssistant = memo(MessageAssistantInner, areEqual);

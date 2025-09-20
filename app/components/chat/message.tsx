@@ -112,5 +112,24 @@ function MessageComponent({
   return null;
 }
 
-export const Message = React.memo(MessageComponent);
+// Custom comparator to ignore handler prop changes
+const equalMessage = (a: MessageProps, b: MessageProps) =>
+  a.id === b.id &&
+  a.variant === b.variant &&
+  a.isLast === b.isLast &&
+  a.hasScrollAnchor === b.hasScrollAnchor &&
+  a.model === b.model &&
+  a.readOnly === b.readOnly &&
+  a.status === b.status &&
+  a.metadata === b.metadata &&
+  a.selectedModel === b.selectedModel &&
+  a.isUserAuthenticated === b.isUserAuthenticated &&
+  a.isReasoningModel === b.isReasoningModel &&
+  a.reasoningEffort === b.reasoningEffort &&
+  a.parts === b.parts &&
+  a.onDelete === b.onDelete &&
+  a.onEdit === b.onEdit;
+// Intentionally ignore: onReload, onBranch (their identities change but logic doesn't)
+
+export const Message = React.memo(MessageComponent, equalMessage);
 Message.displayName = "Message";
