@@ -4,11 +4,13 @@ import {
   ChatCircleDotsIcon,
   Eye,
   EyeSlash,
+  PaletteIcon,
   SignOut,
 } from "@phosphor-icons/react";
 import { useRouter } from "next/navigation";
 import React from "react";
 import { useUser } from "@/app/providers/user-provider";
+import { useTheme } from "@/components/theme-provider";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import {
   DropdownMenu,
@@ -17,6 +19,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { ThemeSwitcher } from "@/components/ui/kibo-ui/theme-switcher";
 import { toast } from "@/components/ui/toast";
 import {
   Tooltip,
@@ -31,9 +34,25 @@ import { SettingsTrigger } from "./settings/settings-trigger";
 
 export function UserMenu({ user }: { user: Doc<"users"> }) {
   const { signOut } = useUser();
+  const { setTheme } = useTheme();
   const router = useRouter();
   const [isMenuOpen, setMenuOpen] = React.useState(false);
   const [isSettingsOpen, setSettingsOpen] = React.useState(false);
+
+  // Track theme preference including system option
+  const [themePreference, setThemePreference] = React.useState<
+    "light" | "dark" | "system"
+  >(() => {
+    if (typeof window === "undefined") {
+      return "system";
+    }
+    return (
+      (localStorage.getItem("themePreference") as
+        | "light"
+        | "dark"
+        | "system") || "system"
+    );
+  });
 
   const [showEmail, setShowEmail] = React.useState<boolean>(() => {
     if (typeof window === "undefined") {
@@ -68,6 +87,41 @@ export function UserMenu({ user }: { user: Doc<"users"> }) {
       toast({ title: "Failed to sign out", status: "error" });
     }
   };
+
+  const handleThemeChange = React.useCallback(
+    (newTheme: "light" | "dark" | "system") => {
+      setThemePreference(newTheme);
+      localStorage.setItem("themePreference", newTheme);
+
+      if (newTheme === "system") {
+        // Apply system preference
+        const systemTheme = window.matchMedia("(prefers-color-scheme: dark)")
+          .matches
+          ? "dark"
+          : "light";
+        setTheme(systemTheme);
+      } else {
+        setTheme(newTheme);
+      }
+    },
+    [setTheme]
+  );
+
+  // Listen for system theme changes when in system mode
+  React.useEffect(() => {
+    if (themePreference !== "system") {
+      return;
+    }
+
+    const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
+    const handleSystemThemeChange = (e: MediaQueryListEvent) => {
+      setTheme(e.matches ? "dark" : "light");
+    };
+
+    mediaQuery.addEventListener("change", handleSystemThemeChange);
+    return () =>
+      mediaQuery.removeEventListener("change", handleSystemThemeChange);
+  }, [themePreference, setTheme]);
 
   return (
     <DropdownMenu modal={false} onOpenChange={setMenuOpen} open={isMenuOpen}>
@@ -126,6 +180,21 @@ export function UserMenu({ user }: { user: Doc<"users"> }) {
           </button>
         </DropdownMenuItem>
         <DropdownMenuSeparator />
+        <DropdownMenuItem
+          className="flex items-center justify-between py-1 hover:bg-transparent focus:bg-transparent"
+          onSelect={(e) => e.preventDefault()}
+        >
+          <span className="flex items-center">
+            <PaletteIcon className="mr-2 size-4" />
+            Theme
+          </span>
+          <ThemeSwitcher
+            className="scale-100"
+            defaultValue="system"
+            onChange={handleThemeChange}
+            value={themePreference}
+          />
+        </DropdownMenuItem>
         <SettingsTrigger
           isMenuItem={true}
           onOpenChange={handleSettingsOpenChange}

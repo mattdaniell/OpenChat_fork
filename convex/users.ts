@@ -1,4 +1,5 @@
 import { getAuthUserId } from "@convex-dev/auth/server";
+import { R2 } from "@convex-dev/r2";
 import {
   calculateRateLimit,
   type RateLimitConfig,
@@ -6,6 +7,7 @@ import {
 import { ConvexError, v } from "convex/values";
 import { MODEL_DEFAULT } from "../lib/config";
 import { ERROR_CODES } from "../lib/error-codes";
+import { components } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import {
   internalMutation,
@@ -642,8 +644,6 @@ export const deleteAccount = mutation({
     const deletionPromises: Promise<unknown>[] = [];
 
     // Delete attachments and their files
-    const { R2 } = await import("@convex-dev/r2");
-    const { components } = await import("./_generated/api");
     const r2 = new R2(components.r2);
     for (const att of attachments) {
       deletionPromises.push(

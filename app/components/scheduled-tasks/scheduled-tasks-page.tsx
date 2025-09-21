@@ -62,7 +62,12 @@ export function ScheduledTasksPage() {
         {isMobile ? (
           <div className="mb-8 space-y-4">
             {/* Mobile: Title centered at top */}
-            <h1 className="text-center font-semibold text-3xl">Agents</h1>
+            <div className="text-center">
+              <p className="mb-1 font-mono text-base text-muted-foreground">
+                Background
+              </p>
+              <h1 className="font-semibold text-4xl">Agents</h1>
+            </div>
 
             {/* Mobile: Full-width tabs */}
             <Tabs
@@ -78,7 +83,7 @@ export function ScheduledTasksPage() {
           </div>
         ) : (
           /* Desktop: Three-column layout */
-          <div className="mb-12 grid grid-cols-3 items-center pr-4">
+          <div className="mb-12 grid grid-cols-3 items-end pr-4">
             {/* Tabs on the left */}
             <div className="justify-self-start">
               <Tabs
@@ -93,16 +98,19 @@ export function ScheduledTasksPage() {
               </Tabs>
             </div>
 
-            {/* Centered Title */}
-            <h1 className="justify-self-center font-semibold text-4xl">
-              Agents
-            </h1>
+            {/* Centered Title with Background above */}
+            <div className="justify-self-center text-center">
+              <p className="mb-1 font-mono text-base text-muted-foreground">
+                Background
+              </p>
+              <h1 className="font-semibold text-4xl">Agents</h1>
+            </div>
 
             {/* Add button on the right */}
             <div className="justify-self-end">
               <TaskTrigger
                 trigger={
-                  <Button>
+                  <Button type="button">
                     <Plus className="mr-2 h-4 w-4" />
                     Add new
                   </Button>
@@ -138,7 +146,7 @@ export function ScheduledTasksPage() {
               {activeTab === "active" && !isMobile && (
                 <TaskTrigger
                   trigger={
-                    <Button size="sm" variant="outline">
+                    <Button size="sm" type="button" variant="outline">
                       Create your first background agent
                     </Button>
                   }
@@ -169,6 +177,7 @@ export function ScheduledTasksPage() {
                 aria-label="Add new background agent"
                 className="h-14 w-14 rounded-full shadow-lg"
                 size="icon"
+                type="button"
               >
                 <Plus className="h-6 w-6" />
               </Button>
