@@ -4,7 +4,8 @@ import { X } from "@phosphor-icons/react";
 import { useAction } from "convex/react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useCallback } from "react";
+import { useCallback, useRef } from "react";
+import type { ReactNode } from "react";
 import { useUser } from "@/app/providers/user-provider";
 import { PricingTableOne } from "@/components/billingsdk/pricing-table-one";
 import {
@@ -19,7 +20,7 @@ import { api } from "@/convex/_generated/api";
 import { plans } from "@/lib/billingsdk-config";
 
 type UpgradeDrawerProps = {
-  trigger: React.ReactNode;
+  trigger: ReactNode;
   isOpen: boolean;
   onOpenChange: (open: boolean) => void;
 };
@@ -32,9 +33,15 @@ export function UpgradeDrawer({
   const { user, products } = useUser();
   const generateCheckoutLink = useAction(api.polar.generateCheckoutLink);
   const router = useRouter();
+  const isCheckoutInFlight = useRef(false);
 
   const handlePlanSelect = useCallback(
     async (planId: string) => {
+      // Prevent double-clicks and multiple checkout sessions
+      if (isCheckoutInFlight.current) {
+        return;
+      }
+
       // Only handle pro plan selection (free plan doesn't need action)
       if (planId === "free") {
         return;
@@ -50,6 +57,9 @@ export function UpgradeDrawer({
         return;
       }
 
+      // Set in-flight flag immediately before API call
+      isCheckoutInFlight.current = true;
+
       try {
         const { url } = await generateCheckoutLink({
           productIds: [products.premium.id],
@@ -57,9 +67,12 @@ export function UpgradeDrawer({
           successUrl: `${window.location.origin}/settings?upgraded=true`,
         });
 
+        // Keep flag true during redirect since we're leaving the page
         window.location.href = url;
       } catch (error) {
         // Silent error handling - user will notice if checkout fails
+        // Reset flag on error so user can retry
+        isCheckoutInFlight.current = false;
       }
     },
     [user?.isAnonymous, products?.premium?.id, generateCheckoutLink, router]

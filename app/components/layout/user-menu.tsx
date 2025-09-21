@@ -4,7 +4,7 @@ import {
   ChatCircleDotsIcon,
   Eye,
   EyeSlash,
-  Palette,
+  PaletteIcon,
   SignOut,
 } from "@phosphor-icons/react";
 import { useRouter } from "next/navigation";
@@ -185,7 +185,7 @@ export function UserMenu({ user }: { user: Doc<"users"> }) {
           onSelect={(e) => e.preventDefault()}
         >
           <span className="flex items-center">
-            <Palette className="mr-2 size-4" />
+            <PaletteIcon className="mr-2 size-4" />
             Theme
           </span>
           <ThemeSwitcher

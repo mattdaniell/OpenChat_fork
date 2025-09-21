@@ -110,7 +110,7 @@ export function ScheduledTasksPage() {
             <div className="justify-self-end">
               <TaskTrigger
                 trigger={
-                  <Button>
+                  <Button type="button">
                     <Plus className="mr-2 h-4 w-4" />
                     Add new
                   </Button>
@@ -146,7 +146,7 @@ export function ScheduledTasksPage() {
               {activeTab === "active" && !isMobile && (
                 <TaskTrigger
                   trigger={
-                    <Button size="sm" variant="outline">
+                    <Button size="sm" type="button" variant="outline">
                       Create your first background agent
                     </Button>
                   }
@@ -177,6 +177,7 @@ export function ScheduledTasksPage() {
                 aria-label="Add new background agent"
                 className="h-14 w-14 rounded-full shadow-lg"
                 size="icon"
+                type="button"
               >
                 <Plus className="h-6 w-6" />
               </Button>

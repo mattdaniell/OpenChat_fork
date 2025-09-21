@@ -1,6 +1,6 @@
 "use client";
 
-import { Check, Zap } from "lucide-react";
+import { CheckIcon, LightningIcon } from "@phosphor-icons/react";
 import { useState, useId } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { cva, type VariantProps } from "class-variance-authority";
@@ -402,7 +402,7 @@ export function PricingTableOne({
                         animate={{ opacity: 1, x: 0 }}
                         transition={{ duration: 0.3, delay: featureIndex * 0.05 }}
                       >
-                        <Check className={cn(featureIconVariants({ size, theme }))} />
+                        <CheckIcon aria-hidden="true" className={cn(featureIconVariants({ size, theme }))} />
                         <span className={cn(
                           theme === "classic" && "text-foreground/90"
                         )}>
@@ -413,12 +413,13 @@ export function PricingTableOne({
                   </ul>
 
                   <Button
+                    type="button"
                     className={buttonVariants({ theme })}
                     onClick={() => onPlanSelect?.(plan.id)}
                     aria-label={`Select ${plan.title} plan`}
                   >
                     {theme === "classic" && plan.highlight && (
-                      <Zap className="w-4 h-4 mr-1" />
+                      <LightningIcon aria-hidden="true" className="w-4 h-4 mr-1" />
                     )}
                     {plan.buttonText}
                     {theme === "classic" && (

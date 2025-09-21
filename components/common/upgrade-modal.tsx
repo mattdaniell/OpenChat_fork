@@ -3,7 +3,7 @@
 import { useAction } from "convex/react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useCallback } from "react";
+import { useCallback, useRef } from "react";
 import { useUser } from "@/app/providers/user-provider";
 import { PricingTableOne } from "@/components/billingsdk/pricing-table-one";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
@@ -19,9 +19,15 @@ export function UpgradeModal({ isOpen, onOpenChange }: UpgradeModalProps) {
   const { user, products } = useUser();
   const generateCheckoutLink = useAction(api.polar.generateCheckoutLink);
   const router = useRouter();
+  const isCheckoutInFlight = useRef(false);
 
   const handlePlanSelect = useCallback(
     async (planId: string) => {
+      // Prevent double-clicks and multiple checkout sessions
+      if (isCheckoutInFlight.current) {
+        return;
+      }
+
       // Only handle pro plan selection (free plan doesn't need action)
       if (planId === "free") {
         return;
@@ -37,6 +43,9 @@ export function UpgradeModal({ isOpen, onOpenChange }: UpgradeModalProps) {
         return;
       }
 
+      // Set in-flight flag immediately before API call
+      isCheckoutInFlight.current = true;
+
       try {
         const { url } = await generateCheckoutLink({
           productIds: [products.premium.id],
@@ -44,9 +53,12 @@ export function UpgradeModal({ isOpen, onOpenChange }: UpgradeModalProps) {
           successUrl: `${window.location.origin}/settings?upgraded=true`,
         });
 
+        // Keep flag true during redirect since we're leaving the page
         window.location.href = url;
       } catch (error) {
         // Silent error handling - user will notice if checkout fails
+        // Reset flag on error so user can retry
+        isCheckoutInFlight.current = false;
       }
     },
     [user?.isAnonymous, products?.premium?.id, generateCheckoutLink, router]
