@@ -53,6 +53,10 @@ const nextConfig: NextConfig = {
         protocol: "https",
         hostname: "api.microlink.io",
       },
+      {
+        protocol: "https",
+        hostname: "*.r2.dev",
+      },
       // Add Convex hostname dynamically
       ...(() => {
         const convexHostname = getConvexHostname();

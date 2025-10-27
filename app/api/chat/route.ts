@@ -960,7 +960,7 @@ export async function POST(req: Request) {
                         await saveErrorMessage(
                           chatId,
                           userMsgId,
-                          detectedError, // Pass the DetectedError object directly
+                          detectedError, // Pass DetectedError directly, don't wrap in Error
                           token,
                           selectedModel.id,
                           selectedModel.name,
@@ -1196,7 +1196,6 @@ export async function POST(req: Request) {
       consumeSseStream: consumeStream,
     });
   } catch (err) {
-    // console.log('Unhandled error in chat API:', err);
     return createErrorResponse(err);
   }
 }
